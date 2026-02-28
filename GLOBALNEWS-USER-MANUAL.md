@@ -1,597 +1,745 @@
 # GlobalNews User Manual
 
-> **GlobalNews Crawling & Analysis Auto-Build System — 워크플로우 실행 가이드**
+> **GlobalNews Crawling & Analysis System — 운영 가이드**
 
-이 문서는 GlobalNews 자식 시스템의 워크플로우를 실행하는 방법을 안내한다.
-부모 프레임워크(AgenticWorkflow)의 사용법은 [`AGENTICWORKFLOW-USER-MANUAL.md`](AGENTICWORKFLOW-USER-MANUAL.md)를 참조한다.
+이 문서는 완성된 GlobalNews 시스템을 **운영하는 방법**을 안내한다.
+시스템 구축 과정(워크플로우 20단계)이 아닌, 구축된 시스템의 **일일 크롤링, 분석, 대시보드 조회, 자동화 설정**에 초점을 둔다.
 
 | 항목 | 내용 |
 |------|------|
-| **대상** | 이 워크플로우를 실행하는 사용자 (연구자, 운영자) |
-| **워크플로우** | 20-step (Research → Planning → Implementation) |
-| **실행 도구** | Claude Code CLI |
-| **소요 시간** | 워크플로우 전체 구축 후, 일일 자동 운영 |
+| **대상** | 이 시스템을 운영하는 연구자, 데이터 분석가 |
+| **시스템 상태** | Production-Ready (20/20 단계 완료) |
+| **하드웨어** | MacBook M2 Pro, 48GB RAM |
+| **핵심 산출물** | Parquet (ZSTD) + SQLite (FTS5) + Streamlit 대시보드 |
 
 ---
 
-## 1. 사전 준비
+## 1. 설치 및 초기 설정
 
 ### 1.1 필수 환경
 
 | 항목 | 요구 사항 | 확인 방법 |
 |------|----------|----------|
-| 하드웨어 | MacBook M2 Pro 16GB+ | `sysctl hw.memsize` |
 | Python | 3.10 이상 | `python3 --version` |
-| Claude Code | 최신 버전 | `claude --version` |
-| PyYAML | 설치 필요 | `pip install pyyaml` |
-| 디스크 공간 | 20GB+ 여유 | 크롤링 데이터 + NLP 모델 |
+| 디스크 공간 | 20GB+ 여유 | 크롤링 데이터 + NLP 모델 저장 |
+| RAM | 16GB 이상 (권장 48GB) | `sysctl hw.memsize` |
+| 네트워크 | 인터넷 연결 필수 | 44개 해외 뉴스 사이트 접근 |
 
-### 1.2 초기 설정
+### 1.2 설치 절차
 
 ```bash
 # 1. 프로젝트 클론
 git clone <repo-url> GlobalNews-Crawling-AgenticWorkflow
 cd GlobalNews-Crawling-AgenticWorkflow
 
-# 2. Claude Code 인프라 검증
-claude --init
+# 2. 가상환경 생성 및 의존성 설치
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 
-# 3. 테스트 실행 (선택)
-python3 -m pytest tests/ -v
+# 3. NLP 모델 다운로드 (분석 파이프라인용)
+python3 -m spacy download en_core_web_sm
+python3 -m spacy download ko_core_news_sm
+
+# 4. 환경 검증
+python3 scripts/preflight_check.py --project-dir . --mode full --json
 ```
 
-### 1.3 인프라 검증 (`/install`)
+### 1.3 사전 비행 점검 (Preflight Check)
 
-Claude Code 내에서 `/install`을 실행하면 Hook 인프라의 건강 상태를 분석한다:
-
-- Python 버전 확인
-- 19개 Hook 스크립트 구문 검증
-- PyYAML 설치 확인
-- SOT 쓰기 패턴 안전성 검증
-- 런타임 디렉터리 자동 생성
-
----
-
-## 2. 워크플로우 시작
-
-### 2.1 시작 방법
-
-Claude Code를 실행한 후, 아래 중 하나를 입력:
-
-| 입력 | 동작 |
-|------|------|
-| `시작하자` | 자연어 트리거 → `/start` 자동 실행 |
-| `크롤링 시작` | 동일 |
-| `워크플로우 시작` | 동일 |
-| `/start` | 직접 슬래시 명령 실행 |
-
-### 2.2 Autopilot 모드 (전자동)
-
-`(human)` 체크포인트(Steps 4, 8, 18)를 자동 승인하는 모드:
-
-| 입력 | 동작 |
-|------|------|
-| `autopilot으로 시작해줘` | Autopilot ON + 워크플로우 시작 |
-| `전자동으로 실행` | 동일 |
-| `autopilot 해제` | 수동 모드 전환 |
-
-> **주의**: Autopilot에서도 `(hook)` exit code 2 차단은 무시되지 않는다. Safety Hook은 항상 존중된다.
-
-### 2.3 ULW (Ultrawork) 모드
-
-프롬프트에 `ulw`를 포함하면 최대 철저함 모드가 활성화된다:
-
-```
-ulw 시작하자        # ULW + 수동 모드
-ulw autopilot으로    # ULW + Autopilot (최대 조합)
-```
-
-ULW 강화 규칙:
-- **I-1 Sisyphus Persistence**: 최대 3회 재시도, 각 시도는 다른 접근법
-- **I-2 Mandatory Task Decomposition**: 비-trivial 작업 시 태스크 분해 강제
-- **I-3 Bounded Retry Escalation**: 동일 대상 3회 초과 재시도 금지
-
-### 2.4 시작 시 발생하는 일
-
-`/start` 실행 시 자동으로:
-
-1. `scripts/workflow_starter.py`가 SOT + workflow.md를 파싱
-2. 현재 단계(`current_step`)와 상태를 확인
-3. 구조화된 시작 컨텍스트 생성
-4. 해당 단계의 실행 가이드를 로드
-
----
-
-## 3. Research Phase (Steps 1-4)
-
-### Step 1: 대상 사이트 정찰 및 분류
-
-| 항목 | 내용 |
-|------|------|
-| **에이전트** | `@site-recon` (sonnet) |
-| **산출물** | `research/site-reconnaissance.md` |
-| **Review** | `@fact-checker` |
-| **Translation** | `@translator` → `research/site-reconnaissance.ko.md` |
-
-**사용자 행동**: 없음 (자동 실행). 에이전트가 44개 사이트를 방문하여 구조를 분석한다.
-
-**완료 기준**:
-- 44개 사이트 전수 분석 (P1: `validate_site_coverage.py`)
-- 각 사이트의 크롤링 난이도, 구조, 섹션 수 기록
-- `@fact-checker`가 정보 정확성 검증
-
-### Step 2: 기술 스택 검증 (팀)
-
-| 항목 | 내용 |
-|------|------|
-| **팀** | `tech-validation-team` (3명) |
-| **멤버** | `@dep-validator`, `@nlp-benchmarker`, `@memory-profiler` |
-| **산출물** | `research/tech-validation.md` |
-
-**사용자 행동**: 없음. 3명의 전문 에이전트가 병렬로:
-- 의존성 패키지 설치/검증
-- 한국어 NLP 모델 벤치마크
-- 메모리 사용 시나리오 프로파일링
-
-### Step 3: 크롤링 실현성 분석
-
-| 항목 | 내용 |
-|------|------|
-| **에이전트** | `@crawl-analyst` (opus) |
-| **산출물** | `research/crawling-feasibility.md` |
-| **Review** | `@fact-checker` |
-| **Translation** | `@translator` |
-
-**사용자 행동**: 없음. 44개 사이트별 크롤링 전략과 4-level retry 아키텍처를 설계한다.
-
-### Step 4: (human) 리서치 리뷰 및 우선순위 결정
-
-| 항목 | 내용 |
-|------|------|
-| **유형** | 사용자 체크포인트 |
-| **명령** | `/review-research` |
-
-**사용자 행동**:
-1. Steps 1-3의 산출물을 검토한다
-2. `/review-research` 명령을 실행한다
-3. 옵션 선택:
-   - **proceed** — 다음 Phase로 진행
-   - **rework [step]** — 특정 단계 재작업 지시
-   - **modify** — 요구사항 수정
-
-> Autopilot 모드에서는 자동 승인된다 (품질 극대화 기본값).
-
----
-
-## 4. Planning Phase (Steps 5-8)
-
-### Step 5: 시스템 아키텍처 설계도
-
-| 항목 | 내용 |
-|------|------|
-| **에이전트** | `@system-architect` (opus) |
-| **산출물** | `planning/architecture-blueprint.md` |
-| **Review** | `@reviewer` |
-| **Translation** | `@translator` |
-
-**사용자 행동**: 없음. 4-Layer 아키텍처, Parquet/SQLite 스키마, 모듈 인터페이스를 설계한다.
-
-### Step 6: 사이트별 크롤링 전략 설계 (팀)
-
-| 항목 | 내용 |
-|------|------|
-| **팀** | `crawl-strategy-team` (4명) |
-| **멤버** | `@crawl-strategist-{kr,en,asia,global}` |
-| **산출물** | `planning/crawling-strategies.md` |
-
-**사용자 행동**: 없음. 44개 사이트를 4개 언어/지역 그룹으로 나누어 병렬로 전략을 수립한다.
-
-### Step 7: 분석 파이프라인 상세 설계
-
-| 항목 | 내용 |
-|------|------|
-| **에이전트** | `@pipeline-designer` (opus) |
-| **산출물** | `planning/analysis-pipeline-design.md` |
-| **Review** | `@reviewer` |
-| **Translation** | `@translator` |
-
-**사용자 행동**: 없음. 8-Stage 파이프라인의 입출력 형식, 56개 기법 매핑, 5-Layer 분류 규칙을 설계한다.
-
-**핵심 검증**: `validate_technique_coverage.py`로 56개 기법 전수 매핑 확인.
-
-### Step 8: (human) 아키텍처 승인
-
-| 항목 | 내용 |
-|------|------|
-| **유형** | 사용자 체크포인트 |
-| **명령** | `/review-architecture` |
-
-**사용자 행동**:
-1. Steps 5-7의 설계를 검토한다
-2. `/review-architecture` 명령을 실행한다
-3. 옵션 선택: proceed / rework / modify
-
-> 이 체크포인트 이후 Implementation Phase에 진입한다. 아키텍처 변경은 이후 비용이 매우 높다.
-
----
-
-## 5. Implementation Phase (Steps 9-20)
-
-### Step 9: 프로젝트 인프라 구축
-
-| 항목 | 내용 |
-|------|------|
-| **에이전트** | `@infra-builder` (opus) |
-| **산출물** | 프로젝트 디렉터리 구조, `sources.yaml`, `pipeline.yaml`, `requirements.txt`, `main.py` |
-
-**사용자 행동**: 없음. 전체 프로젝트 스캐폴딩을 생성한다.
-
-### Step 10: 크롤링 코어 엔진 구현 (팀)
-
-| 항목 | 내용 |
-|------|------|
-| **팀** | `crawl-engine-team` (4명) |
-| **멤버** | `@crawler-core-dev`, `@anti-block-dev`, `@dedup-dev`, `@ua-rotation-dev` |
-| **산출물** | `src/crawling/` 코어 모듈 |
-
-**사용자 행동**: 없음. Dense Checkpoint 패턴으로 4명이 병렬 구현:
-- **crawler-core-dev**: NetworkGuard, URL 발견, 기사 추출
-- **anti-block-dev**: 7가지 차단 진단, 6-Tier 에스컬레이션, Circuit Breaker
-- **dedup-dev**: URL 정규화, SimHash, 제목 유사도
-- **ua-rotation-dev**: User-Agent 회전, 세션 관리
-
-### Step 11: 사이트별 어댑터 구현 (팀)
-
-| 항목 | 내용 |
-|------|------|
-| **팀** | `site-adapters-team` (4명) |
-| **멤버** | 4x `@adapter-dev-*` |
-| **산출물** | `src/crawling/adapters/` (44개 어댑터) |
-
-**사용자 행동**: 없음. 44개 사이트를 4개 그룹으로 나누어 병렬 구현:
-- Korean Major/Economy/Niche (12): `@adapter-dev-kr-major`
-- Korean IT/Science (7): `@adapter-dev-kr-tech`
-- US/English (12): `@adapter-dev-english`
-- Asia-Pacific + Europe/ME (13): `@adapter-dev-multilingual`
-
-**핵심 검증**: `verify_adapter_coverage.py`로 44개 어댑터 완전성 확인.
-
-### Step 12: 크롤링 파이프라인 통합
-
-| 항목 | 내용 |
-|------|------|
-| **에이전트** | `@integration-engineer` (opus) |
-| **산출물** | `src/crawling/pipeline.py`, `retry_manager.py`, `crawl_report.py` |
-
-**사용자 행동**: 없음. 4-Level Retry System (90회 자동 시도)을 포함한 통합 파이프라인을 구현한다.
-
-### Steps 13-14: 분석 파이프라인 구현 (팀 × 2)
-
-| Step | 팀 | Stage | 핵심 기법 |
-|------|-----|-------|----------|
-| 13 | `analysis-foundation-team` (4명) | 1-4 | Kiwi/spaCy, SBERT, KoBERT, BERTopic |
-| 14 | `analysis-signal-team` (4명) | 5-8 | STL, PELT, Granger, 5-Layer, Parquet/SQLite |
-
-**사용자 행동**: 없음. 8명의 전문 에이전트가 8-Stage 파이프라인의 각 Stage를 병렬 구현한다.
-
-### Step 15: 분석 파이프라인 통합
-
-| 항목 | 내용 |
-|------|------|
-| **에이전트** | `@integration-engineer` (opus) |
-| **산출물** | `src/analysis/pipeline.py` |
-
-**사용자 행동**: 없음. 8개 Stage를 직렬 연결하고, Stage 간 메모리 관리(모델 로드 → 처리 → 저장 → 해제)를 구현한다.
-
-### Step 16: E2E 테스트 (44사이트 전체 크롤+분석)
-
-| 항목 | 내용 |
-|------|------|
-| **에이전트** | `@test-engineer` (opus) |
-| **산출물** | `testing/e2e-test-report.md`, `testing/per-site-results.json` |
-| **Review** | `@reviewer` |
-| **Translation** | `@translator` |
-
-**사용자 행동**: 없음. 전체 시스템을 실제로 실행하여 검증한다:
-- 44개 사이트 실제 크롤링
-- 8-Stage 분석 파이프라인 실행
-- 성공률 ≥ 80%, 일일 기사 ≥ 500건, E2E ≤ 3시간 확인
-
-### Step 17: 자동화 및 스케줄링
-
-| 항목 | 내용 |
-|------|------|
-| **에이전트** | `@devops-engineer` (opus) |
-| **산출물** | `scripts/run_daily.sh`, `scripts/run_weekly_rescan.sh`, `src/utils/self_recovery.py` |
-
-**사용자 행동**: 없음. cron 설정, 자기 복구, 로그 관리를 구현한다.
-
-### Step 18: (human) 최종 시스템 리뷰
-
-| 항목 | 내용 |
-|------|------|
-| **유형** | 사용자 체크포인트 |
-| **명령** | `/review-final` |
-
-**사용자 행동**:
-1. E2E 테스트 보고서 (Step 16) 검토
-2. 자동화 설정 (Step 17) 확인
-3. `/review-final` 실행
-4. 옵션:
-   - **approve** — 운영 배포 승인
-   - **fix [issue]** — 특정 이슈 수정 지시
-   - **disable [sites]** — 특정 사이트 비활성화
-
-### Step 19: 문서화
-
-| 항목 | 내용 |
-|------|------|
-| **에이전트** | `@doc-writer` (opus) |
-| **산출물** | `README.md`, `docs/operations-guide.md`, `docs/architecture-guide.md` |
-| **Translation** | `@translator` |
-
-**사용자 행동**: 없음. 구축된 시스템의 운영 문서를 생성한다.
-
-### Step 20: 최종 코드 리뷰
-
-| 항목 | 내용 |
-|------|------|
-| **에이전트** | `@reviewer` (opus) |
-| **산출물** | `review-logs/step-20-review.md` |
-| **Translation** | `@translator` |
-
-**사용자 행동**: 없음. 전체 코드베이스에 대한 적대적 리뷰:
-- 보안 (SQL injection, credential 노출)
-- 정확성 (PRD 스키마 일치, 44사이트+56기법 완전성)
-- 신뢰성 (retry, Circuit Breaker, 자기 복구)
-- 합법성 (robots.txt, Rate Limiting)
-
----
-
-## 6. 진행 모니터링
-
-### 6.1 SOT 상태 확인
+실행 전 환경이 준비되었는지 검증한다:
 
 ```bash
-# Claude Code 외부에서
-python3 scripts/sot_manager.py --read --project-dir .
-
-# Claude Code 내부에서
-현재 상태 알려줘
+python3 scripts/preflight_check.py --project-dir . --mode full --json
 ```
 
-SOT 출력 예시:
+점검 항목:
+- Python 버전 호환성
+- 핵심 의존성 설치 상태 (44개 패키지)
+- 설정 파일 유효성 (`sources.yaml`, `pipeline.yaml`)
+- 디스크 공간 충분 여부
+- 데이터 디렉터리 구조
+
+출력 예시:
+
+```json
+{
+  "readiness": "ready",
+  "critical_failures": [],
+  "degradations": ["patchright missing -- Extreme difficulty sites will be skipped"],
+  "enabled_sites": 44,
+  "disk_free_gb": 128.5
+}
+```
+
+| 결과 | 의미 | 다음 행동 |
+|------|------|----------|
+| `readiness: "ready"` | 모든 준비 완료 | 파이프라인 실행 가능 |
+| `readiness: "blocked"` | 필수 항목 실패 | `critical_failures` 확인 후 수정 |
+| `degradations` 존재 | 일부 기능 제한 | 대부분의 사이트는 정상 작동 |
+
+> **patchright 미설치**: Extreme 난이도 사이트 5곳(Bloomberg, FT 등)이 건너뛰어질 뿐, 나머지 39개 사이트는 RSS/Sitemap으로 정상 크롤링된다.
+
+---
+
+## 2. CLI 사용법 (main.py)
+
+모든 파이프라인 실행은 `main.py`를 통해 이루어진다.
+
+### 2.1 기본 문법
+
+```bash
+python3 main.py --mode <MODE> [OPTIONS]
+```
+
+### 2.2 실행 모드
+
+| 모드 | 설명 | 예시 |
+|------|------|------|
+| `crawl` | 뉴스 크롤링만 실행 | `python3 main.py --mode crawl --date 2026-02-27` |
+| `analyze` | 분석 파이프라인만 실행 | `python3 main.py --mode analyze --all-stages` |
+| `full` | 크롤링 + 분석 전체 실행 | `python3 main.py --mode full --date 2026-02-27` |
+| `status` | 시스템 상태 확인 | `python3 main.py --mode status` |
+
+### 2.3 옵션
+
+| 옵션 | 설명 | 기본값 |
+|------|------|--------|
+| `--date YYYY-MM-DD` | 대상 날짜 | 오늘 |
+| `--sites chosun,yna,...` | 특정 사이트만 크롤링 | 전체 활성 사이트 |
+| `--groups A,B,...` | 특정 그룹만 크롤링 | 전체 그룹 |
+| `--stage N` | 특정 분석 스테이지만 실행 (1-8) | - |
+| `--all-stages` | 전체 8스테이지 실행 | - |
+| `--dry-run` | 설정 검증만 (실제 실행 안 함) | - |
+| `--log-level` | 로그 레벨 (DEBUG/INFO/WARNING/ERROR) | INFO |
+
+### 2.4 실행 예시
+
+```bash
+# 오늘 날짜로 전체 파이프라인 실행
+python3 main.py --mode full
+
+# 특정 날짜 크롤링
+python3 main.py --mode crawl --date 2026-02-27
+
+# 한국 주요 언론만 크롤링 (Group A, B)
+python3 main.py --mode crawl --groups A,B
+
+# 조선일보, 연합뉴스만 크롤링
+python3 main.py --mode crawl --sites chosun,yna
+
+# 분석만 실행 (기존 크롤링 데이터 사용)
+python3 main.py --mode analyze --all-stages
+
+# 특정 스테이지만 재실행
+python3 main.py --mode analyze --stage 3
+
+# 실행 전 설정 검증 (dry-run)
+python3 main.py --mode full --dry-run
+
+# 시스템 상태 확인
+python3 main.py --mode status
+```
+
+### 2.5 사이트 그룹
+
+44개 사이트는 7개 그룹으로 분류된다:
+
+| 그룹 | 카테고리 | 사이트 수 | 예시 |
+|------|---------|----------|------|
+| A | 한국 주요 종합 | 5 | 조선, 동아, 한겨레, 경향, 연합뉴스 |
+| B | 한국 경제/방송 | 6 | 매경, 한경, KBS, MBC, SBS, MBN |
+| C | 한국 기술/과학 | 8 | ZDNet Korea, 전자신문, 블로터 등 |
+| D | 영미 주요 | 6 | NYT, BBC, Guardian, Reuters, AP, Washington Post |
+| E | 영미 기술/경제 | 6 | TechCrunch, Wired, Bloomberg, FT, The Verge, Ars Technica |
+| F | 아시아 태평양 | 7 | NHK, Yomiuri, SCMP, Straits Times, The Hindu 등 |
+| G | 유럽/중동 | 6 | Le Monde, Der Spiegel, El Pais, Al Jazeera 등 |
+
+---
+
+## 3. 크롤링 파이프라인
+
+### 3.1 크롤링 흐름
+
+```
+URL 발견 (RSS/Sitemap/HTML)
+    ↓
+3-Level 중복 제거
+    ├── L1: URL 정규화
+    ├── L2: Title Jaccard (0.85)
+    └── L3: SimHash (Hamming ≤ 3)
+    ↓
+기사 추출 (newspaper3k + BeautifulSoup)
+    ↓
+4-Level 자동 재시도 (최대 90회)
+    ├── NetworkGuard (5회)
+    ├── Mode 에스컬레이션 (2단계: RSS → HTML)
+    ├── Crawler 에스컬레이션 (3단계: requests → aiohttp → patchright)
+    └── Pipeline 에스컬레이션 (3단계: delay → rotate-UA → circuit-break)
+    ↓
+JSONL 저장 (data/raw/YYYY-MM-DD/)
+```
+
+### 3.2 크롤링 결과 확인
+
+```bash
+# 수집된 기사 수 확인
+wc -l data/raw/$(date +%Y-%m-%d)/all_articles.jsonl
+
+# 크롤링 리포트 확인
+cat data/raw/$(date +%Y-%m-%d)/crawl_report.json | python3 -m json.tool
+
+# 사이트별 수집 현황
+python3 -c "
+import json
+from collections import Counter
+with open('data/raw/$(date +%Y-%m-%d)/all_articles.jsonl') as f:
+    sources = Counter(json.loads(line)['source_id'] for line in f)
+for src, cnt in sources.most_common():
+    print(f'{src:25s} {cnt:5d}')
+"
+```
+
+### 3.3 크롤링 실패 대응
+
+| 실패 유형 | 원인 | 자동 대응 | 수동 대응 |
+|----------|------|----------|----------|
+| HTTP 403/406 | IP/UA 차단 | UA 회전 → 지연 증가 → Circuit Break | 사이트 비활성화 (`enabled: false`) |
+| RSS 변경 | 피드 URL 변경 | 자동 감지 불가 | `sources.yaml` URL 업데이트 |
+| DOM 구조 변경 | 선택자 불일치 | fallback 선택자 시도 | 어댑터 코드 수정 |
+| 타임아웃 | 사이트 응답 지연 | 재시도 (NetworkGuard 5회) | `sources.yaml` 타임아웃 증가 |
+| Paywall 추가 | 유료화 전환 | 미리보기 영역만 추출 | 사이트 비활성화 또는 전략 변경 |
+
+---
+
+## 4. 분석 파이프라인 (8 Stages)
+
+### 4.1 스테이지 개요
+
+| Stage | 이름 | 핵심 기법 | 라이브러리 |
+|-------|------|----------|-----------|
+| 1 | 전처리 | 토큰화, 불용어 제거, 정규화 | Kiwi (한국어), spaCy (영어) |
+| 2 | 특성 추출 | TF-IDF, SBERT 임베딩, NER, 키워드 | sentence-transformers, KeyBERT |
+| 3 | 기사별 분석 | 감성, 감정, STEEPS 분류, 편향 | KoBERT, transformers |
+| 4 | 집계 분석 | BERTopic, HDBSCAN 클러스터링, 커뮤니티 | BERTopic, HDBSCAN, networkx |
+| 5 | 시계열 분석 | STL 분해, PELT 변점, Kleinberg 버스트 | statsmodels, ruptures |
+| 6 | 교차 분석 | Granger 인과, PCMCI, 네트워크, 프레임 | tigramite, networkx |
+| 7 | 신호 분류 | 5-Layer 분류, 노벨티, 특이점 | 커스텀 규칙 엔진 |
+| 8 | 최종 출력 | Parquet 저장, SQLite 인덱스 | PyArrow, sqlite3 |
+
+### 4.2 스테이지별 실행
+
+```bash
+# 전체 8스테이지 순차 실행
+python3 main.py --mode analyze --all-stages
+
+# 특정 스테이지만 실행 (이전 스테이지 출력 필요)
+python3 main.py --mode analyze --stage 3
+
+# 체크포인트 기반: Stage 5부터 재실행
+python3 main.py --mode analyze --stage 5
+# → Stage 5 결과를 덮어쓰고 다음 스테이지 수동 실행
+```
+
+### 4.3 메모리 관리
+
+각 스테이지는 "모델 로드 → 처리 → 저장 → 모델 해제" 패턴으로 메모리를 관리한다:
+
+- **Stage 2** (SBERT): ~2GB 피크 (sentence-transformers 모델 로드)
+- **Stage 3** (KoBERT): ~3GB 피크 (transformers 모델 로드)
+- **Stage 4** (BERTopic): ~4GB 피크 (HDBSCAN + UMAP)
+- **나머지**: < 1GB
+
+48GB RAM 환경에서는 모든 스테이지가 안정적으로 실행된다.
+16GB RAM 환경에서도 스테이지별 순차 실행으로 안전하게 처리 가능하다.
+
+### 4.4 5-Layer 신호 분류 (Stage 7)
+
+뉴스 트렌드를 5단계 계층으로 분류한다:
+
+| Layer | 이름 | 지속 기간 | 감지 기준 |
+|-------|------|----------|----------|
+| L1 | Fad | < 1주 | Kleinberg burst, 급격한 상승+하강 |
+| L2 | Short-term | 1-4주 | PELT 변점, 지속적 상승 |
+| L3 | Mid-term | 1-6개월 | STL 트렌드 성분, Granger 인과 |
+| L4 | Long-term | 6개월+ | 장기 트렌드, 다중 소스 교차 확인 |
+| L5 | Singularity | 전례 없음 | 노벨티 점수 > 0.9, 교차 도메인 확산 |
+
+---
+
+## 5. 대시보드 (Streamlit)
+
+### 5.1 실행
+
+```bash
+streamlit run dashboard.py
+```
+
+브라우저에서 `http://localhost:8501` 접속.
+
+### 5.2 사이드바 컨트롤
+
+| 컨트롤 | 설명 |
+|--------|------|
+| **기간** | Daily / Monthly / Quarterly / Yearly |
+| **기준 날짜** | 데이터가 존재하는 날짜 선택 |
+
+대시보드는 `data/raw/` 하위의 `YYYY-MM-DD` 디렉터리를 자동 탐색하여 사용 가능한 날짜를 표시한다.
+
+### 5.3 탭 구성
+
+| 탭 | 내용 |
+|----|------|
+| **Overview** | 총 기사 수, 소스별 분포, 카테고리별 분포, 언어별 분포 차트 |
+| **Topics** | BERTopic 토픽 목록, 토픽별 기사 수, 대표 키워드, 토픽 비율 파이 차트 |
+| **Sentiment & Emotions** | 소스별/카테고리별 감성 분포, 감정(Plutchik 8가지) 히트맵 |
+| **Time Series** | 시계열 트렌드, STL 분해 결과, 버스트 감지 시각화 |
+| **Word Cloud** | 전체/토픽별/카테고리별 워드 클라우드 (한국어 + 영어) |
+| **Article Explorer** | 개별 기사 검색, 필터, 원문 링크, 분석 결과 상세 |
+
+### 5.4 대시보드 스크린샷 예시
+
+대시보드는 다중 기간(Daily/Monthly/Quarterly/Yearly) 집계를 지원한다.
+월간 선택 시 해당 월의 모든 날짜 데이터를 자동 병합하여 보여준다.
+
+---
+
+## 6. 데이터 조회
+
+### 6.1 데이터 디렉터리 구조
+
+```
+data/
+├── raw/YYYY-MM-DD/           ← 크롤링 원본 (JSONL)
+│   ├── all_articles.jsonl    ← 전체 기사 (1행 = 1기사)
+│   ├── crawl_report.json     ← 크롤링 리포트
+│   └── *.jsonl               ← 사이트별 개별 파일
+├── processed/YYYY-MM-DD/     ← 전처리 결과 (Stage 1-2)
+├── features/YYYY-MM-DD/      ← 특성 추출 결과 (Stage 2)
+├── analysis/YYYY-MM-DD/      ← 분석 결과 (Stage 3-7)
+│   └── analysis.parquet      ← 기사별 분석 결과 (21 columns)
+├── output/YYYY-MM-DD/        ← 최종 산출물
+│   ├── articles.parquet      ← 정제된 기사 (12 columns, ZSTD)
+│   ├── analysis.parquet      ← 분석 결과 (21 columns, ZSTD)
+│   ├── topics.parquet        ← 토픽 정보 (7 columns)
+│   ├── signals.parquet       ← 신호 분류 (12 columns)
+│   └── index.sqlite          ← 검색 인덱스 (FTS5)
+├── dedup.sqlite              ← 중복 제거 DB (전역)
+└── logs/                     ← 실행 로그
+    ├── daily/                ← 일일 파이프라인 로그
+    ├── weekly/               ← 주간 리스캔 로그
+    ├── errors.log            ← 에러 로그 (누적)
+    └── alerts/               ← 실패 알림 파일
+```
+
+### 6.2 Parquet 스키마
+
+**articles.parquet** (정제된 기사):
+
+| 컬럼 | 타입 | 설명 |
+|------|------|------|
+| article_id | string | 고유 ID (source_hash) |
+| source_id | string | 소스 식별자 (chosun, bbc 등) |
+| url | string | 원문 URL |
+| title | string | 기사 제목 |
+| content | string | 본문 텍스트 |
+| published_at | timestamp | 발행 시각 |
+| language | string | 언어 코드 (ko, en, ja 등) |
+| category | string | 카테고리 (politics, tech 등) |
+| author | string | 저자 |
+| word_count | int32 | 단어 수 |
+| crawled_at | timestamp | 수집 시각 |
+| group | string | 그룹 코드 (A-G) |
+
+**analysis.parquet** (분석 결과):
+
+| 컬럼 | 타입 | 설명 |
+|------|------|------|
+| article_id | string | 기사 ID (articles.parquet 조인 키) |
+| sentiment_score | float64 | 감성 점수 (-1.0 ~ 1.0) |
+| sentiment_label | string | 감성 레이블 (positive/negative/neutral) |
+| emotions | string (JSON) | Plutchik 8감정 점수 |
+| steeps_category | string | STEEPS 분류 (Social/Tech/Economic/Env/Political/Security) |
+| keywords | string (JSON) | KeyBERT 추출 키워드 |
+| ner_entities | string (JSON) | NER 엔티티 목록 |
+| topic_id | int32 | BERTopic 토픽 번호 |
+| topic_label | string | 토픽 레이블 (대표 키워드) |
+| embedding | binary | SBERT 임베딩 (384차원) |
+| bias_score | float64 | 편향 점수 |
+| ... | ... | 추가 분석 필드 |
+
+### 6.3 DuckDB로 조회
+
+```python
+import duckdb
+
+con = duckdb.connect()
+
+# 소스별 기사 수 집계
+con.sql("""
+    SELECT source_id, COUNT(*) as cnt
+    FROM 'data/output/2026-02-27/articles.parquet'
+    GROUP BY source_id
+    ORDER BY cnt DESC
+""").show()
+
+# 긍정 기사 Top 10
+con.sql("""
+    SELECT a.title, a.source_id, b.sentiment_score
+    FROM 'data/output/2026-02-27/articles.parquet' a
+    JOIN 'data/output/2026-02-27/analysis.parquet' b USING (article_id)
+    WHERE b.sentiment_label = 'positive'
+    ORDER BY b.sentiment_score DESC
+    LIMIT 10
+""").show()
+
+# 토픽별 기사 수
+con.sql("""
+    SELECT topic_label, COUNT(*) as cnt
+    FROM 'data/output/2026-02-27/topics.parquet'
+    GROUP BY topic_label
+    ORDER BY cnt DESC
+""").show()
+
+# L5 Singularity 신호 검색
+con.sql("""
+    SELECT signal_label, burst_score, novelty_score, evidence_summary
+    FROM 'data/output/2026-02-27/signals.parquet'
+    WHERE signal_layer = 'L5_singularity'
+""").show()
+
+# 여러 날짜 범위 집계
+con.sql("""
+    SELECT source_id, COUNT(*) as total
+    FROM 'data/output/*/articles.parquet'
+    GROUP BY source_id
+    ORDER BY total DESC
+""").show()
+```
+
+### 6.4 Pandas로 조회
+
+```python
+import pandas as pd
+
+# 기사 데이터 로드
+articles = pd.read_parquet("data/output/2026-02-27/articles.parquet")
+analysis = pd.read_parquet("data/output/2026-02-27/analysis.parquet")
+
+# 병합
+df = articles.merge(analysis, on="article_id")
+
+# 소스별 평균 감성
+print(df.groupby("source_id")["sentiment_score"].mean().sort_values())
+
+# 카테고리별 기사 수
+print(df["category"].value_counts())
+
+# 특정 키워드 포함 기사 필터
+ai_articles = df[df["title"].str.contains("AI|인공지능", na=False)]
+print(f"AI 관련 기사: {len(ai_articles)}건")
+```
+
+### 6.5 SQLite 전문 검색 (FTS5)
+
+```python
+import sqlite3
+
+con = sqlite3.connect("data/output/2026-02-27/index.sqlite")
+
+# 한국어 전문 검색
+results = con.execute("""
+    SELECT article_id, title, snippet(articles_fts, 1, '<b>', '</b>', '...', 20)
+    FROM articles_fts
+    WHERE articles_fts MATCH '인공지능 AND 트렌드'
+    ORDER BY rank
+    LIMIT 10
+""").fetchall()
+
+for row in results:
+    print(f"[{row[0]}] {row[1]}")
+    print(f"  {row[2]}")
+
+# 영어 전문 검색
+results = con.execute("""
+    SELECT article_id, title
+    FROM articles_fts
+    WHERE articles_fts MATCH 'climate change OR global warming'
+    LIMIT 10
+""").fetchall()
+
+# 토픽 인덱스 조회
+topics = con.execute("""
+    SELECT topic_id, topic_label, article_count
+    FROM topics_index
+    ORDER BY article_count DESC
+""").fetchall()
+
+con.close()
+```
+
+### 6.6 CLI에서 빠른 데이터 확인
+
+```bash
+# DuckDB CLI (설치: pip install duckdb-cli 또는 brew install duckdb)
+duckdb -c "SELECT source_id, COUNT(*) FROM 'data/output/2026-02-27/articles.parquet' GROUP BY 1 ORDER BY 2 DESC"
+
+# SQLite CLI
+sqlite3 data/output/2026-02-27/index.sqlite "SELECT COUNT(*) FROM articles_fts"
+
+# 원본 JSONL 한 줄 확인
+head -1 data/raw/2026-02-27/all_articles.jsonl | python3 -m json.tool
+```
+
+---
+
+## 7. 자동화 (Cron 설정)
+
+### 7.1 자동화 스크립트 요약
+
+| 스크립트 | 주기 | 시각 | 기능 |
+|---------|------|------|------|
+| `scripts/run_daily.sh` | 매일 | 02:00 AM | 전체 크롤링 + 분석 |
+| `scripts/run_weekly_rescan.sh` | 매주 일요일 | 01:00 AM | 사이트 구조 변경 감지 |
+| `scripts/archive_old_data.sh` | 매월 1일 | 03:00 AM | 30일 이상 데이터 아카이빙 |
+
+### 7.2 Cron 등록
+
+```bash
+crontab -e
+```
+
+아래 내용 추가:
+
+```cron
+# GlobalNews -- Daily Pipeline (02:00 AM)
+0 2 * * * /path/to/GlobalNews-Crawling-AgenticWorkflow/scripts/run_daily.sh >> /path/to/data/logs/cron/cron-daily.log 2>&1
+
+# GlobalNews -- Weekly Rescan (Sunday 01:00 AM)
+0 1 * * 0 /path/to/GlobalNews-Crawling-AgenticWorkflow/scripts/run_weekly_rescan.sh >> /path/to/data/logs/cron/cron-weekly.log 2>&1
+
+# GlobalNews -- Monthly Archive (1st of month, 03:00 AM)
+0 3 1 * * /path/to/GlobalNews-Crawling-AgenticWorkflow/scripts/archive_old_data.sh >> /path/to/data/logs/cron/cron-archive.log 2>&1
+```
+
+> `/path/to/`를 실제 프로젝트 경로로 변경한다.
+
+### 7.3 일일 파이프라인 (run_daily.sh) 상세
+
+실행 흐름:
+1. 가상환경 자동 감지 및 활성화
+2. 사전 건강 점검 (디스크 공간, 의존성)
+3. 잠금 파일 획득 (동시 실행 방지)
+4. `main.py --mode full` 실행 (4시간 타임아웃)
+5. 로그 회전 (500MB 초과 시 30일 이상 로그 삭제)
+6. 잠금 파일 해제
+
+Exit codes:
+| 코드 | 의미 |
+|------|------|
+| 0 | 성공 |
+| 1 | 파이프라인 실패 |
+| 2 | 건강 점검 실패 |
+| 3 | 잠금 획득 실패 (다른 인스턴스 실행 중) |
+| 4 | 타임아웃 (4시간 초과) |
+
+```bash
+# 수동 실행
+scripts/run_daily.sh
+
+# 특정 날짜
+scripts/run_daily.sh --date 2026-02-27
+
+# 설정 검증만
+scripts/run_daily.sh --dry-run
+```
+
+### 7.4 주간 리스캔 (run_weekly_rescan.sh)
+
+사이트 구조 변경을 감지한다:
+- RSS 피드 URL 유효성
+- DOM 선택자(CSS selector) 작동 여부
+- 새 페이월 감지
+- HTTP 상태 코드 변화
+
+깨진 사이트가 5개 이상이면 알림 파일을 생성한다.
+
+```bash
+# 수동 실행
+scripts/run_weekly_rescan.sh
+
+# 리스캔 결과 확인
+cat data/logs/weekly/rescan-$(date +%Y-%m-%d).md
+```
+
+### 7.5 월간 아카이빙 (archive_old_data.sh)
+
+30일 이상 지난 원본 데이터를 압축 아카이빙한다:
+
+```
+data/archive/YYYY/MM/raw-YYYY-MM-DD.tar.gz
+data/archive/YYYY/MM/raw-YYYY-MM-DD.tar.gz.sha256
+```
+
+- SHA256 체크섬 검증 후에만 원본 삭제
+- 아카이빙 실패 시 원본 보존 (데이터 손실 0%)
+
+```bash
+# 수동 실행
+scripts/archive_old_data.sh
+
+# 60일 기준으로 변경
+scripts/archive_old_data.sh --days 60
+
+# 미리보기
+scripts/archive_old_data.sh --dry-run
+```
+
+---
+
+## 8. 새 사이트 추가
+
+### 8.1 sources.yaml에 사이트 정의 추가
 
 ```yaml
-workflow:
-  current_step: 5
-  status: in_progress
-  outputs:
-    step-1: research/site-reconnaissance.md
-    step-2: research/tech-validation.md
-    step-3: research/crawling-feasibility.md
-    step-4: autopilot-logs/step-4-decision.md
-  pacs:
-    current_step_score: 78
-    dimensions: {F: 82, C: 78, L: 80}
+# config/sources.yaml 에 추가
+new_site:
+  group: D                         # A-G 중 적절한 그룹
+  meta:
+    name: "New Site"
+    url: "https://new-site.com"
+    language: en
+    region: us
+    daily_article_estimate: 50
+    enabled: true
+  crawl:
+    primary_method: rss            # rss | sitemap | html_listing
+    rss_url: "https://new-site.com/rss"
+    selectors:
+      article_body: "article .content"
+      title: "h1.headline"
+      date: "time[datetime]"
+      author: "span.author"
+    rate_limit_rpm: 30
+    respect_robots_txt: true
 ```
 
-### 6.2 단계별 산출물 확인
+### 8.2 어댑터 파일 생성
 
-| Phase | 산출물 경로 |
-|-------|-----------|
-| Research (1-3) | `research/` |
-| Planning (5-7) | `planning/` |
-| Implementation (9-17) | `src/`, `testing/`, `scripts/` |
-| Human Decisions (4, 8, 18) | `autopilot-logs/` |
-| Reviews | `review-logs/` |
-| pACS | `pacs-logs/` |
-| Verification | `verification-logs/` |
-| Translations | 원본 경로에 `.ko.md` 확장자 |
+```python
+# src/crawling/adapters/new_site.py
+from src.crawling.adapters.base_adapter import BaseAdapter
 
-### 6.3 품질 로그 확인
+class NewSiteAdapter(BaseAdapter):
+    SOURCE_ID = "new_site"
+
+    def discover_urls(self, date_str: str) -> list[str]:
+        return self._discover_via_rss()
+
+    def extract_article(self, url: str) -> dict | None:
+        return self._extract_with_newspaper(url)
+```
+
+### 8.3 검증
 
 ```bash
-# pACS 점수 확인
-cat pacs-logs/step-N-pacs.md
+# 사이트 커버리지 검증
+python3 scripts/validate_site_coverage.py --file config/sources.yaml --project-dir .
 
-# 리뷰 결과 확인
-cat review-logs/step-N-review.md
-
-# 검증 결과 확인
-cat verification-logs/step-N-verify.md
+# 테스트 크롤링 (1개 사이트만)
+python3 main.py --mode crawl --sites new_site --log-level DEBUG
 ```
 
 ---
 
-## 7. 사용자 개입 체크포인트 상세
+## 9. 모니터링 및 트러블슈팅
 
-### 7.1 `/review-research` (Step 4)
+### 9.1 로그 위치
 
-검토 대상:
-- [ ] 44개 사이트 정찰 보고서가 충분히 상세한가?
-- [ ] 기술 스택 검증에서 NO-GO 항목은 없는가?
-- [ ] 크롤링 실현성 분석의 차단 유형 진단이 합리적인가?
-- [ ] 수집 가능한 사이트가 35개 이상 예상되는가?
+| 로그 | 경로 | 설명 |
+|------|------|------|
+| 일일 파이프라인 | `data/logs/daily/YYYY-MM-DD-daily.log` | 크롤링+분석 전체 로그 |
+| 에러 누적 | `data/logs/errors.log` | 모든 에러 집계 |
+| 알림 | `data/logs/alerts/` | 실패 시 생성되는 알림 파일 |
+| 주간 리스캔 | `data/logs/weekly/rescan-YYYY-MM-DD.md` | 사이트 구조 변경 리포트 |
+| cron 출력 | `data/logs/cron/` | cron 실행 stdout/stderr |
 
-### 7.2 `/review-architecture` (Step 8)
-
-검토 대상:
-- [ ] Staged Monolith 아키텍처가 요구사항에 적합한가?
-- [ ] Parquet/SQLite 스키마가 PRD §7과 일치하는가?
-- [ ] 56개 분석 기법이 8-Stage에 적절히 매핑되었는가?
-- [ ] 메모리 관리 전략 (Stage별 모델 로드/해제)이 타당한가?
-- [ ] 44개 사이트별 크롤링 전략이 실현 가능한가?
-
-### 7.3 `/review-final` (Step 18)
-
-검토 대상:
-- [ ] E2E 테스트 성공률 ≥ 80% (35/44 사이트)?
-- [ ] 일일 기사 수 ≥ 500건?
-- [ ] E2E 소요 시간 ≤ 3시간?
-- [ ] 피크 메모리 < 10GB?
-- [ ] 중복 제거율 ≥ 90%?
-- [ ] cron 설정이 올바른가?
-- [ ] 자기 복구 로직이 정상 동작하는가?
-
----
-
-## 8. 트러블슈팅
-
-### 8.1 워크플로우 시작 실패
+### 9.2 일반적 문제와 해결
 
 | 증상 | 원인 | 해결 |
 |------|------|------|
-| `/start` 무반응 | SOT 파일 부재 | `ls .claude/state.yaml` 확인 |
-| "blocked" 상태 | 이전 단계 미완료 | SOT `current_step` 확인 → 해당 단계 재실행 |
-| Hook 에러 | Python/PyYAML 미설치 | `pip install pyyaml` |
-
-### 8.2 에이전트 실패
-
-| 증상 | 원인 | 해결 |
-|------|------|------|
-| pACS RED (< 50) | 산출물 품질 미달 | Abductive Diagnosis → 재작업 |
-| Review FAIL | 산출물에 Critical 이슈 | 이슈 수정 후 재리뷰 |
-| Verification FAIL | 기준 미충족 | 미충족 기준 확인 → 해당 부분 재실행 |
-| Team 멤버 실패 | 의존성 오류 등 | SendMessage로 피드백 → 멤버 재시도 |
-
-### 8.3 재시도 예산 소진
-
-재시도 예산이 소진되면 사용자 에스컬레이션이 발생한다:
-
-```bash
-# 재시도 예산 확인
-python3 .claude/hooks/scripts/validate_retry_budget.py \
-  --step N --gate verification --project-dir . --check
-
-# 출력 예시: {"can_retry": false, "retries_used": 10, "max_retries": 10}
-```
-
-**해결**: 수동 개입하여 근본 원인을 분석하고, 필요시 Verification 기준 조정 또는 접근법 변경.
-
-### 8.4 P1 검증 스크립트 실패
-
-| 스크립트 | 실패 시 | 해결 |
-|---------|--------|------|
-| `validate_site_coverage.py` | 44사이트 미달 | 누락 사이트 추가 |
-| `validate_technique_coverage.py` | 56기법 미달 | 미매핑 기법 Stage 배정 |
-| `validate_code_structure.py` | 디렉터리/파일 미달 | 누락 파일 생성 |
-| `validate_data_schema.py` | 스키마 불일치 | PRD §7과 대조 후 수정 |
-| `validate_team_state.py` | 팀 상태 불일치 | SOT `active_team` 수정 |
-| `validate_step_transition.py` | 전환 조건 미달 | 누락 산출물/검증 완료 |
-
----
-
-## 9. 구축 완료 후 운영
-
-### 9.1 일상 운영
-
-워크플로우 20단계가 모두 완료되면, 구축된 시스템은 독립적으로 운영된다:
-
-| 시간 | 자동 작업 |
-|------|----------|
-| 02:00 AM | `scripts/run_daily.sh` → 44사이트 크롤링 |
-| 크롤링 직후 | 8-Stage 분석 파이프라인 자동 실행 |
-| 일요일 01:00 AM | 사이트 구조 재스캔 |
-| 매일 아침 | 사용자: `data/output/` 분석 결과 확인 |
-
-### 9.2 새 사이트 추가
-
-```yaml
-# sources.yaml에 추가
-- name: new-site
-  url: https://new-site.com
-  language: en
-  sections: [politics, economy, tech]
-  crawl_difficulty: medium
-  tier: 3
-```
-
-→ 시스템이 자동으로 구조를 파악하고 크롤링을 시작한다.
+| `Lock acquisition failed` | 이전 실행이 아직 진행 중 | `ps aux \| grep main.py` 확인, 필요 시 프로세스 종료 |
+| `Pipeline timed out` | 4시간 타임아웃 초과 | 사이트 그룹을 나누어 실행 (`--groups A,B`) |
+| `spaCy model not found` | NLP 모델 미설치 | `python3 -m spacy download en_core_web_sm` |
+| `ImportError: No module named 'xxx'` | 패키지 미설치 | `pip install -r requirements.txt` |
+| 기사 0건 수집 | 네트워크/차단 이슈 | `--log-level DEBUG`로 재실행, 로그에서 HTTP 상태 확인 |
+| 분석 Stage N 실패 | 이전 Stage 미실행 | `--all-stages`로 Stage 1부터 순차 실행 |
+| `MemoryError` | RAM 부족 | 사이트 수를 줄이거나 (`--groups A`) 스테이지별 실행 |
+| `sqlite3.OperationalError: database is locked` | 동시 접근 | 다른 프로세스가 SQLite 사용 중인지 확인 |
 
 ### 9.3 Tier 6 수동 개입
 
-90회 자동 시도가 모두 실패한 사이트가 있을 때:
+90회 자동 재시도가 모두 실패한 사이트가 있을 때:
 
 ```bash
-# Claude Code에서
+# 실패 로그 분석 (Claude Code 내부에서)
 Tier 6 분석해줘 [사이트명]
 ```
 
-Claude Code가 실패 로그를 분석하고, 사이트 특화 우회 코드를 생성한다.
+Claude Code가 실패 패턴을 분석하고 사이트 특화 우회 코드를 생성한다.
 
-### 9.4 데이터 조회
+대안:
+1. `sources.yaml`에서 해당 사이트 `enabled: false` 설정
+2. 어댑터의 `primary_method`를 변경 (예: `rss` → `html_listing`)
+3. 커스텀 헤더/쿠키 추가
 
-구축된 시스템의 산출물을 조회하는 방법:
+### 9.4 데이터 무결성 확인
 
-```python
-# Parquet (DuckDB)
-import duckdb
-con = duckdb.connect()
-con.sql("SELECT * FROM 'data/output/signals.parquet' WHERE signal_layer = 'L5_singularity'")
+```bash
+# Parquet 파일 검증
+python3 -c "
+import pyarrow.parquet as pq
+for f in ['articles', 'analysis', 'topics', 'signals']:
+    try:
+        t = pq.read_table(f'data/output/2026-02-27/{f}.parquet')
+        print(f'{f}.parquet: {t.num_rows} rows, {t.num_columns} cols -- OK')
+    except Exception as e:
+        print(f'{f}.parquet: ERROR -- {e}')
+"
 
-# Parquet (pandas)
-import pandas as pd
-df = pd.read_parquet("data/output/analysis.parquet")
+# SQLite 무결성 검사
+sqlite3 data/output/2026-02-27/index.sqlite "PRAGMA integrity_check"
 
-# SQLite (전문 검색)
-import sqlite3
-con = sqlite3.connect("data/output/index.sqlite")
-con.execute("SELECT * FROM articles_fts WHERE articles_fts MATCH '인공지능 AND 싱귤래리티'")
-
-# SQLite (벡터 검색 — sqlite-vec)
-con.execute("SELECT * FROM article_embeddings WHERE embedding MATCH ? ORDER BY distance LIMIT 10", [query_vec])
+# 중복 제거 DB 통계
+sqlite3 data/dedup.sqlite "SELECT COUNT(*) FROM url_hashes"
 ```
 
 ---
 
-## 10. 명령어 요약
+## 10. Claude Code 통합
 
-### 10.1 Claude Code 슬래시 명령
+워크플로우 구축이 완료된 후에도, Claude Code에서 자연어로 시스템을 제어할 수 있다.
 
-| 명령 | 시점 | 설명 |
-|------|------|------|
-| `/start` | 워크플로우 시작 | SOT 기반 현재 단계부터 실행 |
-| `/review-research` | Step 4 | Research Phase 산출물 리뷰 |
-| `/review-architecture` | Step 8 | Planning Phase 설계 승인 |
-| `/review-final` | Step 18 | 최종 시스템 리뷰 + 배포 승인 |
-| `/install` | 최초 설정 | Hook 인프라 검증 |
-| `/maintenance` | 주기적 | 건강 검진 (stale archives, doc-code sync) |
+### 10.1 자연어 명령
 
-### 10.2 Orchestrator 스크립트
+| 입력 | 실행되는 동작 |
+|------|-------------|
+| `시작하자` | 전체 파이프라인 실행 (`/run` → `main.py --mode full`) |
+| `크롤링 시작` | 크롤링만 실행 |
+| `분석을 하자` | 분석만 실행 |
+| `상태 확인` | 시스템 상태 표시 |
+| `한국 뉴스만` | `--groups A,B`로 크롤링 |
+| `결과 확인` | `main.py --mode status` |
 
-```bash
-# SOT 관리
-python3 scripts/sot_manager.py --read --project-dir .
-python3 scripts/sot_manager.py --record-output N path --project-dir .
-python3 scripts/sot_manager.py --advance-step N --project-dir .
-python3 scripts/sot_manager.py --update-pacs N --F 85 --C 78 --L 80 --project-dir .
+### 10.2 `/run` 스킬 실행 프로토콜
 
-# 도메인 검증
-python3 scripts/validate_site_coverage.py --file path --project-dir .
-python3 scripts/validate_technique_coverage.py --file path --project-dir .
-python3 scripts/validate_code_structure.py --step N --project-dir .
+Claude Code 내에서 `/run` 또는 시작 트리거를 입력하면:
 
-# 단계별 가이드 추출
-python3 scripts/extract_orchestrator_step_guide.py --step N --project-dir .
-```
-
-### 10.3 품질 검증 스크립트
-
-```bash
-# 4계층 품질 게이트
-python3 .claude/hooks/scripts/validate_pacs.py --step N --check-l0 --project-dir .
-python3 .claude/hooks/scripts/validate_review.py --step N --project-dir . --check-pacs-arithmetic
-python3 .claude/hooks/scripts/validate_verification.py --step N --project-dir .
-python3 .claude/hooks/scripts/validate_translation.py --step N --project-dir . --check-pacs --check-sequence
-
-# 재시도 예산
-python3 .claude/hooks/scripts/validate_retry_budget.py --step N --gate verification --project-dir . --check-and-increment
-
-# 진단
-python3 .claude/hooks/scripts/diagnose_context.py --step N --gate verification --project-dir .
-python3 .claude/hooks/scripts/validate_diagnosis.py --step N --gate verification --project-dir .
-```
+1. **Preflight Check**: `scripts/preflight_check.py` 실행 → 환경 준비 상태 확인
+2. **Dry Run**: `main.py --mode full --dry-run` → 설정 검증
+3. **실행**: `main.py --mode full --date YYYY-MM-DD` → 크롤링 + 분석
+4. **결과 리포트**: 수집 건수, 분석 결과, 출력 파일 목록 표시
+5. **데이터 인벤토리**: 생성된 파일 크기 및 경로 표시
 
 ---
 
@@ -599,9 +747,8 @@ python3 .claude/hooks/scripts/validate_diagnosis.py --step N --gate verification
 
 | 문서 | 내용 |
 |------|------|
-| [`GLOBALNEWS-README.md`](GLOBALNEWS-README.md) | 시스템 개요, 빠른 시작 |
-| [`GLOBALNEWS-ARCHITECTURE.md`](GLOBALNEWS-ARCHITECTURE.md) | 시스템 아키텍처, 데이터 흐름 |
-| [`prompt/workflow.md`](prompt/workflow.md) | 20-step 설계도 (상세 스펙) |
-| [`ORCHESTRATOR-PLAYBOOK.md`](ORCHESTRATOR-PLAYBOOK.md) | Orchestrator 실행 가이드 (스크립트 호출 순서) |
-| [`coding-resource/PRD.md`](coding-resource/PRD.md) | 제품 요구사항 정의서 |
-| [`AGENTICWORKFLOW-USER-MANUAL.md`](AGENTICWORKFLOW-USER-MANUAL.md) | 부모 프레임워크 사용법 |
+| [`GLOBALNEWS-README.md`](GLOBALNEWS-README.md) | 시스템 개요, 빠른 시작, 실행 결과 |
+| [`GLOBALNEWS-ARCHITECTURE.md`](GLOBALNEWS-ARCHITECTURE.md) | 4-Layer 아키텍처, 데이터 흐름, Parquet 스키마 |
+| [`prompt/workflow.md`](prompt/workflow.md) | 20-step 워크플로우 설계도 (구축 과정 기록) |
+| [`config/sources.yaml`](config/sources.yaml) | 44개 사이트 설정 (URL, 선택자, 제한) |
+| [`config/pipeline.yaml`](config/pipeline.yaml) | 8-Stage 분석 파이프라인 설정 |

@@ -1,718 +1,525 @@
-# GlobalNews Architecture & Design
+# GlobalNews — 시스템 아키텍처
 
-> **GlobalNews Crawling & Analysis Auto-Build System — 아키텍처 전체 조감도**
-
-이 문서는 GlobalNews 자식 시스템의 아키텍처를 기술한다.
-부모 프레임워크(AgenticWorkflow)의 아키텍처는 [`AGENTICWORKFLOW-ARCHITECTURE-AND-PHILOSOPHY.md`](AGENTICWORKFLOW-ARCHITECTURE-AND-PHILOSOPHY.md)를 참조한다.
-
-| 항목 | 내용 |
-|------|------|
-| **아키텍처 스타일** | Staged Monolith (단계적 모놀리스) |
-| **실행 환경** | MacBook M2 Pro 16GB, Python 3.10+ |
-| **외부 API 비용** | $0 (Claude API 미사용, 로컬 NLP만) |
-| **데이터 스토리지** | Parquet (ZSTD) + SQLite (FTS5 + sqlite-vec) |
-| **오케스트레이션** | Claude Code (구독제) — Conductor Pattern |
+> 44개 국제 뉴스 사이트를 크롤링하고 56개 NLP 분석 기법으로 처리하는 Staged Monolith 시스템의 기술 아키텍처 문서.
 
 ---
 
-## 1. 시스템 아키텍처 개요
+## 1. 시스템 개요
 
-### 1.1 4-Layer Architecture
+### 1.1 아키텍처 유형: Staged Monolith
 
-```mermaid
-graph TB
-    subgraph Orchestration["Orchestration Layer"]
-        CRON[cron 스케줄러]
-        CC[Claude Code<br/>Conductor Pattern]
-        SOT[state.yaml<br/>SOT]
-        SCRIPTS[22개 P1 스크립트]
-    end
+단일 프로세스 내에서 4개 계층이 순차적으로 실행되는 **Staged Monolith** 아키텍처를 채택했다. 마이크로서비스가 아닌 모놀리스를 선택한 이유:
 
-    subgraph Crawling["Crawling Layer"]
-        DISC[3-Tier URL Discovery]
-        EXTRACT[Article Extraction<br/>Fundus/Trafilatura/Newspaper4k]
-        ANTIBLOCK[Anti-Block Engine<br/>6-Tier Escalation]
-        DEDUP[Dedup Engine<br/>URL+SimHash+Title]
-        ADAPT[44 Site Adapters]
-        RETRY[4-Level Retry<br/>90 Attempts]
-    end
-
-    subgraph Analysis["Analysis Layer — 8 Stages"]
-        S1[Stage 1: Preprocessing<br/>Kiwi/spaCy]
-        S2[Stage 2: Feature Extraction<br/>SBERT/TF-IDF/NER]
-        S3[Stage 3: Article Analysis<br/>Sentiment/Emotion/STEEPS]
-        S4[Stage 4: Aggregation<br/>BERTopic/HDBSCAN/Louvain]
-        S5[Stage 5: Time Series<br/>STL/PELT/Kleinberg/Prophet]
-        S6[Stage 6: Cross-Analysis<br/>Granger/PCMCI/Network]
-        S7[Stage 7: Signal Classification<br/>5-Layer + Novelty + BERTrend]
-        S8[Stage 8: Data Output<br/>Parquet/SQLite]
-    end
-
-    subgraph Storage["Storage Layer"]
-        PQ[Parquet ZSTD]
-        SQL[SQLite FTS5 + vec]
-        DUCK[DuckDB 호환]
-    end
-
-    CRON --> Crawling
-    CC --> Crawling
-    CC --> Analysis
-    SOT --> SCRIPTS
-    SCRIPTS --> SOT
-
-    DISC --> EXTRACT
-    EXTRACT --> DEDUP
-    ANTIBLOCK --> DISC
-    ADAPT --> EXTRACT
-    RETRY --> ANTIBLOCK
-
-    Crawling --> S1
-    S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8
-
-    S8 --> PQ
-    S8 --> SQL
-    PQ --> DUCK
-```
-
-### 1.2 Staged Monolith 설계 근거
-
-마이크로서비스가 아닌 **단계적 모놀리스**를 채택한다:
-
-| 근거 | 설명 |
-|------|------|
-| 단일 머신 | MacBook M2 Pro 16GB — 분산 불필요 |
-| 통신 오버헤드 제거 | 컴포넌트 간 직접 함수 호출 |
-| 운영 단순성 | 단일 프로세스, 단일 배포 |
-| 모듈 경계 유지 | 필요 시 각 Stage를 독립 프로세스로 분리 가능 |
-
-### 1.3 Conductor Pattern (Claude Code 역할)
-
-Claude Code(구독제)는 **데이터를 직접 처리하지 않는다**. Generate → Execute → Read → Decide 루프를 수행한다:
+- **C3 제약** (단일 머신): MacBook M2 Pro에서 전체 파이프라인 실행
+- **메모리 제어**: 단계 간 `gc.collect()`로 정밀한 메모리 관리 (피크 ≤ 48GB)
+- **데이터 로컬리티**: Parquet 파일이 디스크 위에서 단계 간 직접 전달
+- **디버깅 용이**: 단일 프로세스이므로 상태 추적이 단순
 
 ```
-┌──────────────────────────────────────────────┐
-│           Claude Code (구독제)                 │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
-│  │ Generate  │→│ Execute   │→│ Read &    │   │
-│  │ Python    │  │ via Bash  │  │ Decide    │   │
-│  │ Scripts   │  │ Tool      │  │ Next Step │   │
-│  └──────────┘  └──────────┘  └──────────┘   │
-│       ↑                            │          │
-│       └────────────────────────────┘          │
-│              (결과 기반 다음 판단)              │
-└──────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                      main.py (CLI)                          │
+│            crawl │ analyze │ full │ status                  │
+├──────────────────┼──────────────────────────────────────────┤
+│                  │                                          │
+│   ┌──────────────▼──────────────┐                          │
+│   │  Layer 1: CRAWLING ENGINE   │                          │
+│   │  44 adapters + anti-block   │                          │
+│   │  → data/raw/YYYY-MM-DD/    │                          │
+│   └──────────────┬──────────────┘                          │
+│                  │ all_articles.jsonl                       │
+│   ┌──────────────▼──────────────┐                          │
+│   │  Layer 2: ANALYSIS PIPELINE │                          │
+│   │  8 stages, 56 techniques   │                          │
+│   │  → data/{processed,features,analysis}/                 │
+│   └──────────────┬──────────────┘                          │
+│                  │ Parquet files                            │
+│   ┌──────────────▼──────────────┐                          │
+│   │  Layer 3: STORAGE           │                          │
+│   │  Parquet ZSTD + SQLite FTS5 │                          │
+│   │  → data/output/YYYY-MM-DD/ │                          │
+│   └──────────────┬──────────────┘                          │
+│                  │                                          │
+│   ┌──────────────▼──────────────┐                          │
+│   │  Layer 4: PRESENTATION      │                          │
+│   │  Streamlit dashboard (6 tabs)│                          │
+│   │  + DuckDB/Pandas/FTS5 쿼리  │                          │
+│   └─────────────────────────────┘                          │
+│                                                             │
+│   [Shared] config/ │ utils/ │ constants.py                 │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-| 컴포넌트 | 역할 | 비용 | 비중 |
-|---------|------|------|------|
-| **cron + Python** | 일상 크롤링 + 분석 | $0 | 95% |
-| **Claude Code** | 워크플로우 설계, 스크립트 생성, Tier 6 | $0 (구독 내) | 5% |
+### 1.2 Conductor Pattern (C2)
+
+Claude Code는 데이터를 직접 처리하지 않는다. Python 스크립트를 생성 → Bash로 실행 → 결과 읽기 → 다음 단계 결정하는 **Conductor(지휘자)** 역할만 수행한다.
 
 ---
 
-## 2. 크롤링 엔진 아키텍처
+## 2. 크롤링 엔진 (Layer 1)
 
-### 2.1 Dynamic-First 전체 사이트 크롤링
-
-기존 RSS/API 기반 도구와 달리, **모든 섹션을 동적으로 탐색**한다:
+### 2.1 전체 아키텍처
 
 ```
-사이트 진입
-  ↓
-[Phase 1: 정적 발견] ─── 60-70% 커버리지
-  • sitemap.xml 파싱 → 전체 URL 목록
-  • RSS 피드 파싱 → 최신 기사 URL
-  ↓
-[Phase 2: DOM 탐색] ─── 추가 15-20%
-  • 네비게이션 메뉴에서 섹션 URL 추출
-  • 각 섹션 페이지 방문 → 기사 링크 추출
-  • 페이지네이션 처리
-  ↓
-[Phase 3: 동적 크롤링] ─── 나머지 10-20%
-  • Playwright/Patchright로 JavaScript 렌더링
-  • 무한 스크롤 + "Load More" 자동 클릭
-  • AJAX 로딩 기사 목록 처리
-  ↓
-[Phase 4: 엣지 케이스]
-  • 실패 URL 재시도 (exponential backoff)
-  • Tier 6 Claude Code 대화형 분석
+sources.yaml (44 sites)
+       │
+       ▼
+┌──────────────────────────────────────────────────┐
+│              CrawlingPipeline                     │
+│  ┌────────────┐  ┌───────────────┐               │
+│  │ SiteAdapter │  │ NetworkGuard  │               │
+│  │ (44개)      │  │ (5-retry HTTP)│               │
+│  └──────┬─────┘  └───────┬───────┘               │
+│         │                │                        │
+│  ┌──────▼────────────────▼───────┐               │
+│  │       URL Discovery            │               │
+│  │  Tier 1: RSS (feedparser)      │               │
+│  │  Tier 2: Sitemap (lxml)        │               │
+│  │  Tier 3: DOM (BeautifulSoup)   │               │
+│  └──────────────┬─────────────────┘               │
+│                 │ DiscoveredURL[]                  │
+│  ┌──────────────▼─────────────────┐               │
+│  │    Article Extraction           │               │
+│  │  Chain: Fundus → Trafilatura    │               │
+│  │        → Newspaper4k → CSS     │               │
+│  └──────────────┬─────────────────┘               │
+│                 │ RawArticle                       │
+│  ┌──────────────▼─────────────────┐               │
+│  │    Deduplication (3-Level)      │               │
+│  │  L1: URL normalize (O(1))      │               │
+│  │  L2: Title Jaccard (≥0.8)      │               │
+│  │  L3: SimHash Hamming (≤10bit)  │               │
+│  └──────────────┬─────────────────┘               │
+│                 ▼                                  │
+│     data/raw/YYYY-MM-DD/all_articles.jsonl        │
+└──────────────────────────────────────────────────┘
 ```
 
-### 2.2 기사 추출 기술 스택 (Fallback Chain)
+### 2.2 사이트 어댑터 시스템
 
-| 순위 | 라이브러리 | F1 Score | 용도 |
-|------|----------|---------|------|
-| 1차 | **Fundus** 0.4.x | 0.977 | 지원 매체 (~39개 영어 매체) |
-| 2차 | **Trafilatura** 2.0.0 | 0.958 | 범용 (최고 Recall 0.978) |
-| 3차 | **Newspaper4k** | 0.90+ | 폴백 (한국어 매체 추가 지원) |
+44개 사이트 각각에 대한 전용 어댑터가 `src/crawling/adapters/`에 구현되어 있다.
 
-### 2.3 적응형 차단 돌파 시스템
+**기반 클래스**: `BaseSiteAdapter` (450+ lines)
 
-#### 7가지 차단 유형 진단
+핵심 속성: SITE_ID, SITE_NAME, SITE_URL, LANGUAGE, GROUP, RSS_URLS, SITEMAP_URL, TITLE_CSS, BODY_CSS, DATE_CSS, AUTHOR_CSS, ANTI_BLOCK_TIER, UA_TIER, RATE_LIMIT_SECONDS, PAYWALL_TYPE 등.
 
-| # | 차단 유형 | 증상 | 자동 진단 |
-|---|----------|------|----------|
-| B1 | IP 차단 | HTTP 403/429 | 응답 코드 모니터링 |
-| B2 | User-Agent 필터링 | 특정 UA 차단 | UA 회전 후 응답 비교 |
-| B3 | Rate Limiting | 연속 요청 시 지연 | 요청 간격 vs 응답 시간 |
-| B4 | CAPTCHA | CAPTCHA 리다이렉션 | HTML 패턴 감지 |
-| B5 | JavaScript 챌린지 | Cloudflare/Akamai | JS 실행 요구 감지 |
-| B6 | 핑거프린트 탐지 | 브라우저 특성 차단 | CDP 프로토콜 감지 |
-| B7 | Geo-Block | IP 지역 차단 | 다른 지역 프록시 확인 |
+**어댑터 그룹**:
 
-#### 6-Tier 에스컬레이션
+| 그룹 | 디렉터리 | 사이트 수 | 특징 |
+|------|---------|----------|------|
+| Korean Major | `kr_major/` | 11 | 네이버 연동, Kiwi 토크나이저, 한국어 날짜 파싱 |
+| Korean Tech | `kr_tech/` | 8 | 기술 뉴스, 간단한 구조, RSS 중심 |
+| English | `english/` | 12 | 페이월 사이트(NYT, FT, WSJ) 포함 |
+| Multilingual | `multilingual/` | 13 | CJK 인코딩, RTL(아랍/히브리), 다중 언어 |
 
-```mermaid
-graph LR
-    T1[Tier 1<br/>요청 간격 조정<br/>+ UA 회전<br/>$0] --> T2[Tier 2<br/>세션 관리<br/>+ 헤더 다변화<br/>$0]
-    T2 --> T3[Tier 3<br/>Playwright<br/>동적 렌더링<br/>$0]
-    T3 --> T4[Tier 4<br/>Patchright<br/>+ 핑거프린트<br/>$0]
-    T4 --> T5[Tier 5<br/>주거용 프록시<br/>$0.10-1/GB]
-    T5 --> T6[Tier 6<br/>Claude Code<br/>대화형 분석<br/>$0 구독내]
-
-    style T1 fill:#c8e6c9
-    style T2 fill:#c8e6c9
-    style T3 fill:#fff9c4
-    style T4 fill:#fff9c4
-    style T5 fill:#ffe0b2
-    style T6 fill:#ffcdd2
-```
-
-| Tier | 전략 | 비용 | 자동화 |
-|------|------|------|--------|
-| 1 | 요청 간격 조정 (5→10→15초) + UA 회전 | $0 | 완전 자동 |
-| 2 | 세션 관리 (쿠키 순환 + Referer) + 헤더 다변화 | $0 | 완전 자동 |
-| 3 | Playwright/Patchright 동적 렌더링 | $0 | 완전 자동 |
-| 4 | Patchright + fingerprint-suite (위장) | $0 | 완전 자동 |
-| 5 | 주거용 프록시 회전 (DataImpulse 등) | $0.10-1/GB | 완전 자동 |
-| 6 | Claude Code 실패 로그 분석 → Python 우회 코드 생성 | $0 (구독) | **반자동** |
-
-### 2.4 4-Level Retry System (90 Automated Attempts)
+### 2.3 4-Level 재시도 시스템
 
 ```
-NetworkGuard(5) × Standard+TotalWar(2) × Crawler(3) × Pipeline(3) = 90
+Level 1: NetworkGuard ×5 (HTTP 재시도, 지수 백오프 base=2s, max=30s)
+Level 2: Standard → TotalWar ×2 (undetected-chromedriver 전환)
+Level 3: Crawler ×3 (라운드, 딜레이 [30s, 60s, 120s])
+Level 4: Pipeline ×3 (전체 재시작, [60s, 120s, 300s])
+─────────────────────────────────────
+이론적 최대: 5 × 2 × 3 × 3 = 90회 자동 시도
+Tier 6: Claude Code 인터랙티브 분석으로 에스컬레이션
 ```
 
-| Level | 위치 | 재시도 | 설명 |
-|-------|------|--------|------|
-| **L1 — NetworkGuard** | HTTP 요청 | 5회 | 개별 HTTP 요청 레벨 (exponential backoff) |
-| **L2 — Mode** | 크롤링 모드 | 2가지 | Standard → TotalWar (undetected-chromedriver) |
-| **L3 — Crawler** | 사이트 레벨 | 3라운드 | 사이트별 3라운드 (증가하는 지연) |
-| **L4 — Pipeline** | 전체 파이프라인 | 3회 | 전체 재시작 (이미 수집된 URL 보존) |
+### 2.4 안티블록 시스템
 
-> 90회 자동 시도 후 → **Tier 6 에스컬레이션** (Claude Code 대화형). 파이프라인은 종료하지 않고 에스컬레이션한다.
+**7가지 차단 유형 진단** (BlockDetector):
+IP Block, UA Filter, Rate Limit, CAPTCHA, JS Challenge, Fingerprint, Geo-Block
 
-### 2.5 Circuit Breaker 패턴
+**6-Tier 에스컬레이션**:
+Tier 1 (딜레이+UA) → Tier 2 (세션/쿠키) → Tier 3 (Playwright) → Tier 4 (Patchright+핑거프린트) → Tier 5 (프록시) → Tier 6 (수동 분석)
 
-| 상태 | 조건 | 동작 |
-|------|------|------|
-| **Closed** (정상) | 연속 성공 | 정상 크롤링 계속 |
-| **Open** (차단) | 연속 실패 5회 | 크롤링 중단, 30분 대기, Tier 에스컬레이션 |
-| **Half-Open** (시험) | 대기 후 | 단일 요청 테스트, 성공 시 Closed 복귀 |
+**Circuit Breaker**: CLOSED →(5연속 실패)→ OPEN →(300초 대기)→ HALF_OPEN →(성공)→ CLOSED
 
-### 2.6 중복 제거 (3-Level)
+### 2.5 중복 제거 (3-Level)
 
-| 수준 | 방법 | 설명 |
-|------|------|------|
-| URL 정규화 | 쿼리 파라미터 제거 + 정규화 | `?utm_source=...` 등 제거 |
-| 콘텐츠 해시 | SimHash/MinHash | 본문 유사도 95%+ 중복 판정 |
-| 제목 유사도 | Jaccard + 편집거리 | 동일 기사의 다른 매체 버전 탐지 |
+| Level | 방법 | 기준 |
+|-------|------|------|
+| L1 | URL 정규화 + 정확 매칭 | 쿼리 파라미터 제거, 프로토콜 정규화 |
+| L2 | 제목 유사도 | Jaccard ≥ 0.8 + Levenshtein ≤ 0.2 |
+| L3 | SimHash 본문 핑거프린트 | 64bit 해밍 거리 ≤ 10 |
 
-### 2.7 Site Adapter 패턴 (44개)
+저장소: `data/dedup.sqlite` (크로스-런 지속)
 
-각 사이트에 대해 전용 어댑터를 구현한다. 어댑터는 공통 인터페이스(`BaseSiteAdapter`)를 상속하고 사이트별 CSS 셀렉터, 네비게이션 패턴, 인코딩, 페이지네이션 방식을 캡슐화한다.
+### 2.6 데이터 계약 (RawArticle)
 
-| 그룹 | 어댑터 수 | 개발 에이전트 | 대표 사이트 |
-|------|------:|-------------|-----------|
-| Korean Major + Economy + Niche | 12 | `@adapter-dev-kr-major` | chosun.com, mk.co.kr, ohmynews.com |
-| Korean IT/Science | 7 | `@adapter-dev-kr-tech` | bloter.net, etnews.com, zdnet.co.kr |
-| US/English Major | 12 | `@adapter-dev-english` | nytimes.com, bloomberg.com, cnn.com |
-| Asia-Pacific + Europe/ME | 13 | `@adapter-dev-multilingual` | people.com.cn, aljazeera.com, bild.de |
+```python
+@dataclass(frozen=True)
+class RawArticle:
+    url: str                    # 원본 URL (필수)
+    title: str                  # 제목 (필수)
+    body: str                   # 본문 (필수)
+    source_id: str              # 사이트 ID (필수)
+    source_name: str            # 사이트 이름
+    language: str               # ISO 639-1
+    published_at: datetime      # 발행일시
+    crawled_at: datetime        # 크롤링일시
+    author: str | None          # 저자
+    category: str | None        # 카테고리
+    content_hash: str           # SHA-256 본문 해시
+    crawl_tier: int             # 사용된 티어 (1-6)
+    crawl_method: str           # RSS/Sitemap/DOM/Playwright
+```
 
 ---
 
-## 3. 분석 파이프라인 아키텍처
+## 3. 분석 파이프라인 (Layer 2)
 
-### 3.1 8-Stage Pipeline
-
-```mermaid
-graph TB
-    INPUT[all_articles.jsonl] --> S1
-
-    subgraph NLP_Foundation["NLP Foundation (Stages 1-4)"]
-        S1["Stage 1: Preprocessing<br/>Kiwi(KR) + spaCy(EN)<br/>→ articles.parquet"]
-        S2["Stage 2: Feature Extraction<br/>SBERT + TF-IDF + NER + KeyBERT<br/>→ embeddings/tfidf/ner.parquet"]
-        S3["Stage 3: Article Analysis<br/>Sentiment + Emotion + STEEPS<br/>→ article_analysis.parquet"]
-        S4["Stage 4: Aggregation<br/>BERTopic + HDBSCAN + Louvain<br/>→ topics.parquet"]
-    end
-
-    subgraph Signal_Detection["Signal Detection (Stages 5-8)"]
-        S5["Stage 5: Time Series<br/>STL + PELT + Kleinberg + Prophet<br/>→ timeseries.parquet"]
-        S6["Stage 6: Cross-Analysis<br/>Granger + PCMCI + Network<br/>→ networks/cross_analysis.parquet"]
-        S7["Stage 7: Signal Classification<br/>5-Layer Rules + Novelty + BERTrend<br/>→ signals.parquet"]
-        S8["Stage 8: Data Output<br/>Parquet ZSTD + SQLite FTS5<br/>→ output/"]
-    end
-
-    S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8
-
-    S8 --> OUT1[analysis.parquet]
-    S8 --> OUT2[signals.parquet]
-    S8 --> OUT3[topics.parquet]
-    S8 --> OUT4[index.sqlite]
-```
-
-### 3.2 Stage별 상세
-
-| Stage | 입력 | 출력 | 핵심 기법 | 라이브러리 |
-|-------|------|------|----------|-----------|
-| **1. Preprocessing** | JSONL | `articles.parquet` | 형태소 분석, 언어 감지, 토큰화, 정규화 | Kiwi, spaCy, langdetect |
-| **2. Feature Extraction** | articles.parquet | embeddings/tfidf/ner.parquet | SBERT 임베딩, TF-IDF, NER, KeyBERT, FastText | sentence-transformers, scikit-learn, keybert |
-| **3. Article Analysis** | articles.parquet + features | `article_analysis.parquet` | 감정 분석, 8-감정, STEEPS 분류, 중요도 | KoBERT, KcELECTRA, bart-large-mnli |
-| **4. Aggregation** | analysis + features | `topics.parquet` | BERTopic, DTM, HDBSCAN, NMF/LDA, Louvain | bertopic, Model2Vec, hdbscan, networkx |
-| **5. Time Series** | topics + analysis | `timeseries.parquet` | STL 분해, Kleinberg 버스트, PELT 변화점, Prophet, Wavelet | statsmodels, ruptures, prophet, pywt |
-| **6. Cross-Analysis** | all prior stages | networks/cross.parquet | Granger 인과, PCMCI, 공출현 네트워크, 교차 언어, 프레임 분석 | statsmodels, tigramite, networkx |
-| **7. Signal Classification** | all prior stages | `signals.parquet` | 5-Layer 규칙, Novelty(LOF/IF), BERTrend, Dual-Pass | scikit-learn, custom rules |
-| **8. Data Output** | all results | output/ | Parquet ZSTD, SQLite FTS5+vec, DuckDB 호환 | pyarrow, sqlite3, sqlite-vec |
-
-### 3.3 메모리 관리 전략
-
-M2 Pro 16GB 제약 하에서 8-Stage 파이프라인을 실행하기 위한 전략:
+### 3.1 8단계 파이프라인 흐름
 
 ```
-Stage N 시작
-  → 모델 로드
-  → 데이터 처리
-  → Parquet 저장
-  → 모델 del + gc.collect() + torch.cuda.empty_cache()
-Stage N+1 시작
+all_articles.jsonl
+  │
+  ▼
+Stage 1 (전처리) → articles.parquet
+  │
+  ▼
+Stage 2 (피처) → embeddings/tfidf/ner.parquet
+  │
+  ▼
+Stage 3 (기사 분석) → article_analysis.parquet + mood_trajectory.parquet
+  │
+  ▼
+Stage 4 (집계) → topics/networks/dtm/aux_clusters.parquet
+  │
+  ├─────────────────────────────────────┐
+  ▼                                     ▼
+Stage 5 (시계열, 독립)              Stage 6 (교차분석, 독립)
+→ timeseries.parquet                → cross_analysis.parquet
+  │                                     │
+  └──────────────┬──────────────────────┘
+                 ▼
+Stage 7 (신호 분류) → signals.parquet
+  │
+  ▼
+Stage 8 (출력) → analysis.parquet + index.sqlite + checksums.md5
 ```
 
-| 제약 | 값 |
-|------|-----|
-| 피크 메모리 (전체) | < 10GB |
-| 피크 메모리 (단일 Stage) | ≤ 5GB |
-| 처리 속도 | ≤ 15분 / 1,000기사 (Stage 1-4) |
-| E2E 시간 | ≤ 3시간 (크롤링 + 분석) |
+### 3.2 단계별 상세
 
-### 3.4 5-Layer 신호 계층 아키텍처
+#### Stage 1: 전처리 (T01-T06) — ~1.0 GB
+
+| 기법 | 라이브러리 |
+|------|----------|
+| T01 한국어 형태소 | kiwipiepy (singleton) |
+| T02 영어 레마타이제이션 | spaCy en_core_web_sm |
+| T03 문장 분리 | Kiwi (ko) / spaCy (en) |
+| T04 언어 감지 | langdetect |
+| T05 텍스트 정규화 | NFKC + 공백 |
+| T06 불용어 제거 | 커스텀 (ko) + spaCy (en) |
+
+입력: JSONL → 출력: `articles.parquet` (12 columns)
+
+#### Stage 2: 피처 추출 (T07-T12) — ~2.4 GB
+
+| 기법 | 라이브러리 |
+|------|----------|
+| T07 SBERT 임베딩 | sentence-transformers (384-dim) |
+| T08 TF-IDF | sklearn (10,000 features, ngram 1-2) |
+| T09 NER | xlm-roberta / spaCy |
+| T10 키워드 | keybert (SBERT 공유) |
+| T12 단어 통계 | custom |
+
+출력: `embeddings.parquet`, `tfidf.parquet`, `ner.parquet`
+
+#### Stage 3: 기사 분석 (T13-T19, T49) — ~1.8 GB
+
+| 기법 | 라이브러리 |
+|------|----------|
+| T13 한국어 감성 | KoBERT (F1=94%) |
+| T14 영어 감성 | cardiffnlp/twitter-roberta |
+| T15 8차원 감정 | BART-MNLI / KcELECTRA |
+| T16 STEEPS 분류 | BART-MNLI zero-shot |
+| T17 논조 감지 | BART-MNLI zero-shot |
+| T18 Social Mood Index | 집계 공식 |
+| T19 감정 궤적 | 7일 이동 델타 |
+| T49 내러티브 추출 | BART-MNLI zero-shot |
+
+출력: `article_analysis.parquet` (13 columns) + `mood_trajectory.parquet`
+
+#### Stage 4: 집계 (T21-T28) — ~1.5 GB
+
+| 기법 | 라이브러리 |
+|------|----------|
+| T21 BERTopic | BERTopic + Model2Vec (CPU 500x) |
+| T22 동적 토픽 | BERTopic topics_over_time |
+| T23 HDBSCAN | hdbscan (cosine) |
+| T24 NMF | sklearn |
+| T25 LDA | sklearn |
+| T26 k-means | sklearn (silhouette 최적화) |
+| T27 계층적 클러스터링 | scipy Ward |
+| T28 Louvain 커뮤니티 | python-louvain |
+
+출력: `topics.parquet`, `networks.parquet`, `dtm.parquet`, `aux_clusters.parquet`
+
+#### Stage 5: 시계열 (T29-T36) — ~0.5 GB (독립)
+
+| 기법 | 라이브러리 |
+|------|----------|
+| T29 STL 분해 | statsmodels (주기=7) |
+| T30 Kleinberg 버스트 | custom automaton |
+| T31 PELT 변화점 | ruptures (RBF, BIC) |
+| T32 Prophet 예측 | prophet (7d + 30d) |
+| T33 웨이블릿 | pywt (Daubechies-4) |
+| T34 ARIMA | statsmodels (grid search) |
+| T35 이동평균 교차 | pandas (3d vs 14d) |
+| T36 계절성 | scipy periodogram |
+
+출력: `timeseries.parquet` (17 columns)
+
+#### Stage 6: 교차 분석 (T37-T46, T20, T50) — ~0.8 GB (독립)
+
+| 기법 | 라이브러리 |
+|------|----------|
+| T37 Granger 인과관계 | statsmodels |
+| T38 PCMCI 인과 추론 | tigramite (ParCorr) |
+| T39 공출현 네트워크 | networkx |
+| T40 지식 그래프 | networkx (NER 기반) |
+| T41 중심성 분석 | networkx (degree, betweenness, PageRank) |
+| T42 네트워크 진화 | networkx |
+| T43 교차 언어 토픽 정렬 | SBERT multilingual centroid |
+| T44 프레임 분석 | sklearn TF-IDF KL divergence |
+| T45 의제 설정 | scipy 교차 상관 |
+| T46 시간적 정렬 | DTW |
+| T20 GraphRAG | networkx |
+| T50 모순 감지 | SBERT + NLI |
+
+출력: `cross_analysis.parquet`
+
+#### Stage 7: 신호 분류 (T47-T55) — ~0.5 GB
+
+| 기법 | 라이브러리 |
+|------|----------|
+| T47 LOF 이상치 | sklearn |
+| T48 Isolation Forest | sklearn |
+| T51 Z-score | scipy |
+| T52 엔트로피 변화 | scipy |
+| T53 Zipf 편차 | custom |
+| T54 생존 분석 | lifelines (Kaplan-Meier) |
+| T55 KL 다이버전스 | scipy |
+| BERTrend | custom (토픽 생애주기) |
+| Singularity | weighted composite (7 지표) |
+
+**5-Layer 신호 계층**:
+
+| Layer | 기간 | 특성 |
+|-------|------|------|
+| L1 Fad | < 1주 | 급등-급락, burst_score 높음 |
+| L2 Short-term | 1-4주 | 안정적 성장 후 정체 |
+| L3 Mid-term | 1-6개월 | 변화점 + 트렌드 기울기 |
+| L4 Long-term | 6개월+ | 다중 소스 + 구조적 변화 |
+| L5 Singularity | 12개월+ | 패러다임 전환, 3개 독립 경로 중 2개 필요 |
+
+Singularity 3경로: (1) OOD (LOF+IF), (2) 변화점+BERTrend, (3) Zipf+KL — threshold=0.65
+
+출력: `signals.parquet` (12 columns)
+
+#### Stage 8: 출력 (T56) — ~0.5 GB
+
+1. **analysis.parquet 병합** (21 columns): 5개 소스 조인 → ZSTD 압축
+2. **signals.parquet 최종화**: 스키마 검증
+3. **topics.parquet 복사**: ZSTD
+4. **SQLite 인덱스**: FTS5 + vec + signals_index + topics_index
+5. **DuckDB 검증**: 모든 Parquet 읽기 확인
+6. **품질 검증**: 중복 ID, 임베딩 차원(384), NOT NULL
+
+### 3.3 메모리 관리
+
+- **MAX_MEMORY_GB**: 48.0 GB
+- **gc.collect()**: 모든 단계 사이 강제 실행
+- **모델 라이프사이클**: 순차 로드/언로드 (concurrent 금지)
+- **Kiwi singleton**: 필수 (재로딩 시 +125MB 누수)
+- **SBERT 공유**: KeyBERT + BERTopic이 동일 인스턴스 사용
+
+### 3.4 날짜별 경로 변환
+
+모든 상수 경로(`DATA_PROCESSED_DIR / "articles.parquet"`)는 `_remap_path()`를 통해 날짜별 파티션으로 변환:
 
 ```
-                          시간 →
-    ┌─────────────────────────────────────────────┐
-L5  │ ●                     ●                     │ Singularity (> 12m)
-    │   ●                                         │   복합 7지표 ≥ 0.65
-    ├─────────────────────────────────────────────┤
-L4  │ ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬                 │ Long-term (3-12m)
-    │   임베딩 드리프트 + Wavelet                  │   STEEPS 지속성
-    ├─────────────────────────────────────────────┤
-L3  │ ████████████████                             │ Mid-term (2-12w)
-    │   PELT 변화점 + 네트워크 진화                │   프레임 전환
-    ├─────────────────────────────────────────────┤
-L2  │ ░░░░░░░░░                                    │ Short-term (2-14d)
-    │   BERTopic DTM + 감정 궤적                   │   이동평균 교차
-    ├─────────────────────────────────────────────┤
-L1  │ ▌▌▌                                          │ Fad (< 48h)
-    │   Kleinberg 버스트 + Z-score                 │   이상 탐지
-    └─────────────────────────────────────────────┘
-```
-
-| Layer | 시간 범위 | 핵심 탐지 기법 | 최소 데이터 |
-|-------|----------|-------------|-----------|
-| **L1 Fad** | < 48h ~ 2주 | Kleinberg 버스트 + Z-score | 7일 |
-| **L2 Short** | 2주 ~ 3개월 | BERTopic DTM + 감정 궤적 + MA 교차 | 30일 |
-| **L3 Mid** | 3개월 ~ 1년 | PELT 변화점 + 네트워크 진화 + 프레임 | 6개월 |
-| **L4 Long** | 1 ~ 5년 | 임베딩 드리프트 + Wavelet + STEEPS | 2년+ |
-| **L5 Singularity** | 비주기 | Novelty + CrossDomain + BERTrend + 복합 7지표 | 6개월+ |
-
-### 3.5 Dual-Pass 분석 전략
-
-| Pass | 대상 | 역할 | 기법 |
-|------|------|------|------|
-| **Pass 1: 제목** | 기사 제목 | 신호 탐지 (빠른 스캔) | 키워드 빈도, 버스트 감지, 감정 극성 |
-| **Pass 2: 본문** | 기사 전문 | 증거 확보 (심층 분석) | NER, 토픽 모델링, 프레임 분석, 인과 추론 |
-
-> 제목은 "**무엇이** 일어나고 있는가"를, 본문은 "**왜, 어떻게** 일어나고 있는가"를 답한다.
-
-### 3.6 싱귤래리티 탐지 (L5)
-
-3가지 독립 경로 교차 검증:
-
-| 경로 | 방법 | 설명 |
-|------|------|------|
-| OOD 감지 | LOF + Isolation Forest | 기존 토픽에 속하지 않는 기사 |
-| 변화점 감지 | PELT + 확률 분포 변화 | 구조적 전환점 |
-| BERTrend | weak signal → emerging 전환 | 약한 신호의 첫 출현 포착 |
-
-**복합 점수 공식**:
-
-```
-S = w1×OOD + w2×Changepoint + w3×CrossDomain + w4×BERTrend
-  + w5×Entropy + w6×Novelty + w7×Network
+constants: data/processed/articles.parquet
+→ runtime: data/processed/2026-02-27/articles.parquet
 ```
 
 ---
 
 ## 4. 데이터 아키텍처
 
-### 4.1 데이터 플로우
+### 4.1 날짜별 파티션
 
 ```
-sources.yaml
-  ↓
-[크롤링] → raw/all_articles.jsonl (일일 단일 파일)
-  ↓
-[Stage 1] → data/processed/articles.parquet
-  ↓
-[Stage 2] → data/features/{embeddings,tfidf,ner}.parquet
-  ↓
-[Stage 3] → data/analysis/article_analysis.parquet
-  ↓
-[Stage 4] → data/analysis/topics.parquet
-  ↓
-[Stage 5] → data/analysis/timeseries.parquet
-  ↓
-[Stage 6] → data/analysis/{networks,cross_analysis}.parquet
-  ↓
-[Stage 7] → data/output/signals.parquet
-  ↓
-[Stage 8] → data/output/
-  ├── analysis.parquet   (전체 통합)
-  ├── signals.parquet    (5-Layer 신호)
-  ├── topics.parquet     (토픽 모델)
-  └── index.sqlite       (FTS5 + sqlite-vec)
+data/
+├── raw/YYYY-MM-DD/              # 원시 JSONL
+│   ├── all_articles.jsonl
+│   ├── crawl_report.json
+│   ├── .crawl_state.json        # 재개 체크포인트
+│   └── backup/                  # 롤링 백업
+├── processed/YYYY-MM-DD/        # Stage 1 출력
+│   └── articles.parquet
+├── features/YYYY-MM-DD/         # Stage 2 출력
+│   ├── embeddings.parquet
+│   ├── tfidf.parquet
+│   └── ner.parquet
+├── analysis/YYYY-MM-DD/         # Stage 3-6 출력
+│   ├── article_analysis.parquet
+│   ├── topics.parquet
+│   ├── networks.parquet
+│   ├── timeseries.parquet
+│   ├── cross_analysis.parquet
+│   ├── dtm.parquet
+│   ├── aux_clusters.parquet
+│   └── mood_trajectory.parquet
+├── output/YYYY-MM-DD/           # Stage 7-8 최종 출력
+│   ├── analysis.parquet         # 21 columns 병합
+│   ├── signals.parquet          # 12 columns 신호
+│   ├── topics.parquet           # 7 columns 토픽
+│   ├── index.sqlite             # FTS5 + vec
+│   └── checksums.md5
+├── models/                      # ML 모델 캐시
+├── logs/                        # 로그 (daily/weekly/archive/alerts)
+└── dedup.sqlite                 # 전역 중복 제거 DB
 ```
 
 ### 4.2 Parquet 스키마
 
-#### articles.parquet (기사 원본)
+**ARTICLES (12 columns)**: article_id, url, title, body, source, category, language, published_at, crawled_at, author, word_count, content_hash
 
-| 컬럼 | 타입 | 설명 |
-|------|------|------|
-| `article_id` | STRING | 고유 ID (UUID) |
-| `url` | STRING | 원본 URL |
-| `title` | STRING | 기사 제목 |
-| `body` | STRING | 기사 본문 |
-| `source` | STRING | 소스 사이트명 |
-| `category` | STRING | 카테고리 |
-| `language` | STRING | 언어 코드 (ko/en) |
-| `published_at` | TIMESTAMP | 발행일시 |
-| `crawled_at` | TIMESTAMP | 수집일시 |
-| `author` | STRING (nullable) | 저자 |
-| `word_count` | INT32 | 단어 수 |
-| `content_hash` | STRING | 본문 해시 (중복 제거) |
+**ANALYSIS (21 columns)**: article_id, sentiment_label, sentiment_score, emotion_{joy,trust,fear,surprise,sadness,disgust,anger,anticipation}, topic_id, topic_label, topic_probability, steeps_category, importance_score, keywords, entities_{person,org,location}, embedding
 
-#### analysis.parquet (분석 결과)
+**SIGNALS (12 columns)**: signal_id, signal_layer, signal_label, detected_at, topic_ids, article_ids, burst_score, changepoint_significance, novelty_score, singularity_composite, evidence_summary, confidence
 
-| 컬럼 | 타입 | 설명 |
-|------|------|------|
-| `article_id` | STRING | FK → articles |
-| `sentiment_label` | STRING | positive/negative/neutral |
-| `sentiment_score` | FLOAT | -1.0 ~ 1.0 |
-| `emotion_{joy,trust,fear,surprise,sadness,disgust,anger,anticipation}` | FLOAT | Plutchik 8차원 (0-1) |
-| `topic_id` | INT32 | BERTopic 토픽 ID |
-| `topic_label` | STRING | 토픽 레이블 |
-| `topic_probability` | FLOAT | 소속 확률 |
-| `steeps_category` | STRING | S/T/E/En/P/Se |
-| `importance_score` | FLOAT | 중요도 (0-100) |
-| `keywords` | LIST\<STRING\> | KeyBERT Top 10 |
-| `entities_{person,org,location}` | LIST\<STRING\> | NER 개체 |
-| `embedding` | LIST\<FLOAT\> | SBERT 벡터 (384-dim) |
+**Parquet 설정**: ZSTD level 3, 원자적 쓰기 (임시 파일 + rename)
 
-#### signals.parquet (5-Layer 신호)
-
-| 컬럼 | 타입 | 설명 |
-|------|------|------|
-| `signal_id` | STRING | 고유 ID |
-| `signal_layer` | STRING | L1_fad / L2_short / L3_mid / L4_long / L5_singularity |
-| `signal_label` | STRING | 신호 레이블 |
-| `detected_at` | TIMESTAMP | 탐지 시점 |
-| `topic_ids` | LIST\<INT32\> | 관련 토픽 |
-| `article_ids` | LIST\<STRING\> | 관련 기사 |
-| `burst_score` | FLOAT | Kleinberg 버스트 |
-| `changepoint_significance` | FLOAT | 변화점 유의도 |
-| `novelty_score` | FLOAT | LOF/IF 이상 점수 |
-| `singularity_composite` | FLOAT | L5 복합 점수 |
-| `evidence_summary` | STRING | 탐지 근거 |
-| `confidence` | FLOAT | 분류 신뢰도 (0-1) |
-
-### 4.3 SQLite 스키마
+### 4.3 SQLite 인덱스
 
 ```sql
--- FTS5 전문 검색
-CREATE VIRTUAL TABLE articles_fts USING fts5(
-    article_id UNINDEXED, title, body,
-    source UNINDEXED, category UNINDEXED,
-    language UNINDEXED, published_at UNINDEXED,
-    tokenize='unicode61'
-);
-
--- sqlite-vec 벡터 검색
-CREATE VIRTUAL TABLE article_embeddings USING vec0(
-    article_id TEXT PRIMARY KEY,
-    embedding FLOAT[384]
-);
-
--- 신호/토픽/크롤링 인덱스 테이블
-CREATE TABLE signals_index (...);
-CREATE TABLE topics_index (...);
-CREATE TABLE crawl_status (...);
+articles_fts     -- FTS5 (title + body + keywords)
+signals_index    -- topic_id + layer + confidence
+topics_index     -- topic_label + article_count
+crawl_status     -- site_id + crawl_date + article_count
 ```
 
 ---
 
-## 5. 에이전트 아키텍처
+## 5. Presentation Layer
 
-### 5.1 에이전트 구성 (35개)
+### 5.1 Streamlit 대시보드 (dashboard.py)
 
-```mermaid
-graph TB
-    subgraph Core["Core Agents (3)"]
-        TRANS["@translator<br/>영→한 번역"]
-        REV["@reviewer<br/>적대적 리뷰"]
-        FC["@fact-checker<br/>사실 검증"]
-    end
+| 탭 | 시각화 |
+|---|--------|
+| Overview | 기사 수, 소스/그룹/언어별 분포, 일일 볼륨, 파이프라인 상태 |
+| Topics | Top 20 토픽, STEEPS 분류, 신뢰도 히스토그램, 토픽 트렌드 |
+| Sentiment & Emotions | 감성 파이차트, 8차원 레이더, 소스×감정 히트맵, 무드 궤적 |
+| Time Series | 메트릭별 그래프, 이동평균 교차, Prophet 예측+신뢰구간 |
+| Word Cloud | 다국어 워드클라우드, 한국어/영어 필터, Top 30 빈도 |
+| Article Explorer | 소스/언어/키워드 필터, 정렬, 상세 보기 |
 
-    subgraph Research["Research Phase (5)"]
-        RECON["@site-recon<br/>44사이트 정찰"]
-        ANALYST["@crawl-analyst<br/>크롤링 전략"]
-        DEP["@dep-validator<br/>의존성 검증"]
-        NLP_B["@nlp-benchmarker<br/>NLP 벤치마크"]
-        MEM["@memory-profiler<br/>메모리 프로파일"]
-    end
+사이드바: 기간(Daily/Monthly/Quarterly/Yearly), 날짜 선택, 교차분석 패널
 
-    subgraph Planning["Planning Phase (7)"]
-        ARCH["@system-architect<br/>아키텍처 설계"]
-        STR_KR["@crawl-strategist-kr"]
-        STR_EN["@crawl-strategist-en"]
-        STR_AS["@crawl-strategist-asia"]
-        STR_GL["@crawl-strategist-global"]
-        PIPE["@pipeline-designer<br/>분석 파이프라인"]
-    end
+### 5.2 프로그래매틱 쿼리
 
-    subgraph Implementation["Implementation Phase (20)"]
-        INFRA["@infra-builder"]
-        CORE["@crawler-core-dev"]
-        ANTI["@anti-block-dev"]
-        DEDUP_D["@dedup-dev"]
-        UA["@ua-rotation-dev"]
-        AD_KR["@adapter-dev-kr-major"]
-        AD_KT["@adapter-dev-kr-tech"]
-        AD_EN["@adapter-dev-english"]
-        AD_ML["@adapter-dev-multilingual"]
-        INTEG["@integration-engineer"]
-        PRE["@preprocessing-dev"]
-        FEAT["@feature-extraction-dev"]
-        ART["@article-analysis-dev"]
-        AGG["@aggregation-dev"]
-        TS["@timeseries-dev"]
-        CROSS["@cross-analysis-dev"]
-        SIG["@signal-classifier-dev"]
-        STOR["@storage-dev"]
-        TEST["@test-engineer"]
-        DEVOPS["@devops-engineer"]
-        DOC["@doc-writer"]
-    end
-```
-
-### 5.2 Agent Team 구성
-
-| 단계 | 팀명 | 멤버 | 패턴 |
-|------|------|------|------|
-| Step 2 | `tech-validation-team` | `@dep-validator`, `@nlp-benchmarker`, `@memory-profiler` | 병렬 실행 |
-| Step 6 | `crawl-strategy-team` | 4x `@crawl-strategist-{kr,en,asia,global}` | 병렬 실행 (사이트 그룹별) |
-| Step 10 | `crawl-engine-team` | `@crawler-core-dev`, `@anti-block-dev`, `@dedup-dev`, `@ua-rotation-dev` | Dense Checkpoint |
-| Step 11 | `site-adapters-team` | 4x `@adapter-dev-{kr-major,kr-tech,english,multilingual}` | Dense Checkpoint (44개 어댑터) |
-| Step 13 | `analysis-foundation-team` | `@preprocessing-dev`, `@feature-extraction-dev`, `@article-analysis-dev`, `@aggregation-dev` | Dense Checkpoint |
-| Step 14 | `analysis-signal-team` | `@timeseries-dev`, `@cross-analysis-dev`, `@signal-classifier-dev`, `@storage-dev` | Dense Checkpoint |
-
-### 5.3 Dense Checkpoint 패턴
-
-팀 단계에서 각 멤버는 3개 체크포인트(CP-1, CP-2, CP-3)에서 진행 보고한다. Team Lead가 각 체크포인트를 검토하여 품질을 조기에 확보한다:
-
-```
-Teammate 작업 시작
-  → CP-1 보고 (기본 기능 완성)
-  → Team Lead 검토 + SendMessage 피드백
-  → CP-2 보고 (핵심 기능 완성)
-  → Team Lead 검토 + SendMessage 피드백
-  → CP-3 보고 (전체 완성 + 검증)
-  → Team Lead 종합 검증
-  → SOT tasks_completed 갱신
-```
+- **DuckDB**: `SELECT ... FROM read_parquet('data/output/YYYY-MM-DD/analysis.parquet')`
+- **Pandas**: `pd.read_parquet('data/output/YYYY-MM-DD/analysis.parquet')`
+- **SQLite FTS5**: `SELECT * FROM articles_fts WHERE articles_fts MATCH 'query'`
 
 ---
 
-## 6. Orchestrator 인프라
+## 6. 설정 시스템
 
-### 6.1 SOT (Single Source of Truth) 스키마
+### 6.1 sources.yaml
 
-`state.yaml` — 워크플로우 전체 상태를 단일 파일에 관리. `sot_manager.py`로 fcntl 잠금 기반 atomic 조작:
+44개 사이트 설정. 각 사이트: meta (name, url, language, group, enabled, difficulty_tier), crawl (primary_method, rss_urls, sections, rate_limit_seconds, ua_tier, anti_block_tier), selectors (title_css, body_css, date_css), paywall (type).
 
-```yaml
-workflow:
-  name: GlobalNews Crawling & Analysis Auto-Build
-  current_step: 1        # 현재 단계 (1-20)
-  status: in_progress     # in_progress | completed | blocked
-  total_steps: 20
-  parent_genome:           # DNA 유전 기록
-    source: AgenticWorkflow
-    inherited_dna: [...]
-  autopilot:
-    enabled: false
-    auto_approved_steps: []
-  outputs: {}              # step-N: path/to/output
-  verification:
-    last_verified_step: 0
-    retries: {}
-  pacs:
-    current_step_score: null
-    dimensions: {F: null, C: null, L: null}
-    weak_dimension: null
-    pre_mortem_flag: null
-    history: {}
-  active_team: null        # 진행 중인 팀 상태
+### 6.2 pipeline.yaml
+
+8단계 파이프라인 설정. Global (max_memory_gb=10, gc_between_stages, parquet_compression=zstd). 단계별 (enabled, memory_limit_gb, timeout_seconds, models, dependencies).
+
+### 6.3 constants.py (350+ 상수)
+
+경로 27개, 재시도 파라미터 (MAX_RETRIES=5, BACKOFF_MAX=60s), Circuit Breaker (FAILURE_THRESHOLD=5, RECOVERY_TIMEOUT=300s), 크롤링 (LOOKBACK_HOURS=24, MAX_ARTICLES=1000), 분석 (SBERT_DIM=384, TFIDF_MAX=10000), 신호 (CONFIDENCE=0.5, SINGULARITY=0.65).
+
+---
+
+## 7. 운영 인프라
+
+### 7.1 CLI (main.py)
+
+```bash
+python3 main.py --mode {crawl|analyze|full|status}
+                --date YYYY-MM-DD --sites X,Y --groups A,B
+                --stage N --all-stages --dry-run
+                --log-level {DEBUG|INFO|WARNING|ERROR}
 ```
 
-### 6.2 22개 Orchestrator 스크립트
+### 7.2 자동화
 
-| 스크립트 | 역할 | 호출 시점 |
-|---------|------|----------|
-| `sot_manager.py` | SOT atomic 조작 (읽기/쓰기/전진/pACS/팀) | 매 단계 |
-| `workflow_starter.py` | 워크플로우 시작 컨텍스트 생성 | 최초 시작 |
-| `validate_step_transition.py` | 단계 전환 사전 검증 (ST1-ST6) | 단계 전진 전 |
-| `run_quality_gates.py` | L0→L1→L1.5→L2 순차 실행 | 산출물 저장 후 |
-| `validate_site_coverage.py` | 44사이트 커버리지 (SC1-SC4) | Steps 1, 6, 11 |
-| `validate_technique_coverage.py` | 56기법 커버리지 (TC1-TC4) | Step 7 |
-| `validate_code_structure.py` | 코드 구조 (CS1-CS5) | Steps 9-15 |
-| `validate_data_schema.py` | Parquet/SQLite 스키마 (DS1-DS3) | Steps 5, 9 |
-| `validate_team_state.py` | 팀 상태 일관성 (TS1-TS4) | Steps 2, 6, 10-14 |
-| `extract_orchestrator_step_guide.py` | Playbook 단계별 가이드 추출 | 에이전트 컨텍스트 주입 |
-| `extract_site_urls.py` | PRD에서 사이트 목록 추출 | Step 1 |
-| `generate_sources_yaml_draft.py` | sources.yaml 초안 생성 | Step 1 |
-| `split_sites_by_group.py` | 44사이트 → 4그룹 분배 | Step 6 |
-| `distribute_sites_to_teams.py` | 44사이트 → 4팀 배분 | Step 11 |
-| `merge_recon_and_deps.py` | Step 1-2 산출물 병합 | Step 3 |
-| `filter_prd_architecture.py` | PRD §6-8 아키텍처 추출 | Step 5 |
-| `filter_prd_analysis.py` | PRD §5.2 분석 기법 추출 | Step 7 |
-| `extract_architecture_crawling.py` | 크롤링 아키텍처 추출 | Step 10 |
-| `extract_pipeline_design_s1_s4.py` | Stage 1-4 파이프라인 추출 | Step 13 |
-| `extract_pipeline_design_s5_s8.py` | Stage 5-8 파이프라인 추출 | Step 14 |
-| `calculate_success_metrics.py` | PRD §9.1 성공 지표 계산 | Step 16 |
-| `verify_adapter_coverage.py` | 44사이트 어댑터 완전성 | Step 11 |
+| 스케줄 | 스크립트 | 역할 |
+|--------|---------|------|
+| 일일 02:00 | `run_daily.sh` | 전체 파이프라인 (4시간 타임아웃) |
+| 주간 일요일 01:00 | `run_weekly_rescan.sh` | 사이트 건강 점검 |
+| 월간 1일 03:00 | `archive_old_data.sh` | 30일 이상 데이터 아카이빙 |
 
-### 6.3 P1 검증 매트릭스
+### 7.3 Preflight Check
 
-스크립트별 결정론적 검증 항목:
+`python3 scripts/preflight_check.py --project-dir . --mode full --json`
 
-| 검증 코드 | 스크립트 | 검증 내용 |
-|----------|---------|----------|
-| SC1-SC4 | `validate_site_coverage.py` | 44개 사이트 전수 존재, URL 형식, 그룹 완전성 |
-| TC1-TC4 | `validate_technique_coverage.py` | 56개 기법 매핑, Stage 배정, 라이브러리 명시 |
-| CS1-CS5 | `validate_code_structure.py` | 디렉터리 구조, 필수 파일, import, CLI, 어댑터 |
-| DS1-DS3 | `validate_data_schema.py` | Parquet 컬럼, SQLite 테이블, 설정 파일 |
-| TS1-TS4 | `validate_team_state.py` | 팀 필드 존재, 상태 일관성, 완료 기록 |
-| ST1-ST6 | `validate_step_transition.py` | 현재 단계, 산출물, 검증 로그, pACS, 리뷰, 팀 |
-
-### 6.4 4계층 품질 보장 시스템
-
-```
-L0 Anti-Skip Guard (결정론적)
-  → 산출물 파일 존재 + 최소 크기 (100 bytes)
-  ↓
-L1 Verification Gate (의미론적)
-  → 워크플로우의 Verification 기준 100% 달성
-  → 실패 시 최대 10회 재시도 (ULW: 15회)
-  ↓
-L1.5 pACS Self-Rating (신뢰도)
-  → Pre-mortem Protocol → F/C/L 3차원 채점
-  → RED(< 50): 재작업 | YELLOW(50-69): 경고 | GREEN(≥ 70): 진행
-  ↓
-L2 Adversarial Review (비판적)
-  → @reviewer 또는 @fact-checker가 독립 검증
-  → PASS/FAIL → FAIL 시 재작업
-```
+Python 3.12+, 20개 의존성, 44개 사이트 설정, 디스크 ≥2GB, spaCy 모델, 네트워크, 디렉터리 구조 검증.
 
 ---
 
-## 7. 한국어 NLP 스택
+## 8. 테스트 인프라
 
-이 시스템의 핵심 차별화 중 하나는 한국어+영어 융합 분석이다:
+43 파일, ~287 테스트, 18,400 LOC.
 
-| 용도 | 한국어 | 영어 |
-|------|--------|------|
-| 형태소 분석 | **Kiwi** (kiwipiepy 0.22.2) | **spaCy** |
-| 감정 분석 (뉴스) | **KoBERT** (F1=94%) | 로컬 transformer |
-| 감정 분석 (비격식) | **KcELECTRA** (F1=90.6%) | — |
-| NER | **KLUE-RoBERTa-large** | **spaCy** |
-| 문서 임베딩 | **snowflake-arctic-embed-l-v2.0-ko** | **all-MiniLM-L6-v2** |
-| 토픽 모델링 | **BERTopic** + **Model2Vec** (CPU 500x) | 동일 |
-| Zero-shot 분류 | — | **facebook/bart-large-mnli** |
-| Few-shot 분류 | **SetFit** (8개 예시) | 동일 |
-| 교차 언어 정렬 | 다국어 SBERT 임베딩 | ← 동일 공간 |
-
-> **중요**: 모든 모델은 **로컬에서 실행**된다. Claude API 호출 = $0 (제약 C1).
+| 카테고리 | 파일 수 | 내용 |
+|---------|--------|------|
+| unit | 23 | 단계별, SOT, 설정, 중복제거 |
+| integration | 1 | SOT 전체 라이프사이클 |
+| structural | 3 | 에이전트 구조, 사이트 일관성, 플레이북 |
+| crawling | 6 | 안티블록, 서킷브레이커, 어댑터 |
 
 ---
 
-## 8. 실행 모델
+## 9. 의존성 (44+ packages)
 
-### 8.1 일상 운영 (구축 완료 후)
+**크롤링** (13): requests, aiohttp, beautifulsoup4, lxml, feedparser, trafilatura, newspaper4k, playwright, patchright, chardet, simhash, datasketch
 
-| 모드 | 빈도 | 트리거 | 설명 |
-|------|------|--------|------|
-| 자율 크롤링 | 매일 02:00 AM | cron | Tier 1-5 자율 실행 |
-| 자율 분석 | 크롤링 직후 | cron 체인 | 8-Stage 자동 실행 |
-| 구조 재스캔 | 주 1회 (일요일 01:00) | cron | 사이트 네비게이션 변경 감지 |
-| 엣지 케이스 | 필요 시 | 수동 | Claude Code Tier 6 |
-| 모델 재학습 | 월 1회 | 수동 | BERTopic/SetFit 업데이트 |
+**NLP** (12): kiwipiepy, spacy, sentence-transformers, transformers (<5.0), torch, bertopic, keybert, langdetect, scikit-learn, hdbscan, setfit, fasttext-wheel
 
-### 8.2 자기 복구 (Self-Recovery)
+**시계열+네트워크** (9): statsmodels, prophet, ruptures, PyWavelets, lifelines, networkx, python-louvain, tigramite, igraph
 
-| 장애 유형 | 자동 복구 |
-|----------|----------|
-| 파이프라인 크래시 | 체크포인트 기반 재시작 |
-| 잠금 파일 잔존 | stale lock 감지 + 정리 |
-| 디스크 부족 | 실행 전 용량 확인 |
-| 이전 실행 잔존 | 이전 원시 데이터 아카이빙 |
+**저장+유틸** (10): pyarrow, pandas, duckdb, sqlite-vec, pyyaml, pydantic, python-dateutil, tqdm, structlog, pytest
 
 ---
 
-## 9. DNA 유전 (부모 프레임워크로부터)
+## 10. DNA 유전
 
-이 시스템은 AgenticWorkflow 부모 프레임워크의 전체 게놈을 **구조적으로 내장**한다:
+부모 [AgenticWorkflow](AGENTICWORKFLOW-ARCHITECTURE-AND-PHILOSOPHY.md)로부터 유전:
 
-| DNA | 부모에서 유전 | 자식에서 발현 |
-|-----|-------------|-------------|
-| 절대 기준 (품질 절대주의) | 품질 > 모든 것 | 44개 사이트 전부 수집 = 품질 |
-| SOT 패턴 | 단일 파일 상태 관리 | `state.yaml` + `sot_manager.py` |
-| 3단계 구조 | Research → Planning → Implementation | Steps 1-4 → 5-8 → 9-20 |
-| 4계층 QA | L0 → L1 → L1.5 → L2 | 22개 P1 스크립트 + pACS + Review |
-| Safety Hooks | 위험 명령 차단 | 크롤링 합법성 (C5) 강제 |
-| Adversarial Review | Generator-Critic 패턴 | `@reviewer`(5 steps) + `@fact-checker`(2 steps) |
-| Context Preservation | 스냅샷 + RLM | 세션 경계 안전 |
+| DNA | 자식 표현 |
+|-----|----------|
+| 3단계 구조 | Research (4) → Planning (4) → Implementation (12) |
+| SOT | `.claude/state.yaml` |
+| 4계층 QA | L0 Anti-Skip → L1 Verification → L1.5 pACS → L2 Review |
+| Safety Hooks | 위험 명령 차단 |
+| Context Preservation | 스냅샷 + KI + RLM |
+| P1 Hallucination Prevention | 13개 `validate_*.py` |
 
-### 도메인 고유 변이
-
-부모 게놈에 **없는** 이 자식 시스템 고유의 유전자:
-
-| 변이 | 설명 |
-|------|------|
-| **D2 "Never Give Up"** | 4-level retry (90회) + 6-Tier 에스컬레이션 + 자기 수정 코드 |
-| **44-Site Adapter Pattern** | 사이트별 전용 어댑터 + 자동 팀 배분 |
-| **8-Stage Sequential Pipeline** | 메모리 관리 기반 Stage 간 직렬 실행 |
-| **5-Layer Signal Hierarchy** | Fad → Short → Mid → Long → Singularity |
-| **Dual-Pass Analysis** | Title pass (탐지) → Body pass (증거) |
-| **Dense Checkpoint** | 팀 멤버별 CP-1/CP-2/CP-3 조기 품질 확보 |
+**도메인 고유 변이**: 4-Level 재시도 (90회), 44-site Adapter Pattern, 5-Layer Signal Hierarchy, Date-Partitioned Storage
 
 ---
 
-## 10. 관련 문서
+## 11. 빌드 히스토리
 
-| 문서 | 내용 |
-|------|------|
-| [`GLOBALNEWS-README.md`](GLOBALNEWS-README.md) | 시스템 개요, 빠른 시작 |
-| [`GLOBALNEWS-USER-MANUAL.md`](GLOBALNEWS-USER-MANUAL.md) | 워크플로우 실행 가이드 |
-| [`prompt/workflow.md`](prompt/workflow.md) | 20-step 설계도 |
-| [`ORCHESTRATOR-PLAYBOOK.md`](ORCHESTRATOR-PLAYBOOK.md) | 단계별 실행 가이드 |
-| [`coding-resource/PRD.md`](coding-resource/PRD.md) | 제품 요구사항 정의서 |
-| [`AGENTICWORKFLOW-ARCHITECTURE-AND-PHILOSOPHY.md`](AGENTICWORKFLOW-ARCHITECTURE-AND-PHILOSOPHY.md) | 부모 프레임워크 아키텍처 |
+20단계 워크플로우, 32개 전문 서브에이전트, 6개 에이전트 팀으로 AI가 자동 구축.
+
+| 단계 | 내용 | pACS |
+|------|------|------|
+| 1-4 | Research (정찰, 기술검증, 실현가능성) | 70-74 |
+| 5-8 | Planning (아키텍처, 전략, 설계) | 72-80 |
+| 9-12 | Crawling 구현 | 78-82 |
+| 13-15 | Analysis 구현 | 80-82 |
+| 16-20 | 테스트, 자동화, 문서, 리뷰 | 65-84 |
+
+총 코드: ~41,500 (src) + ~18,400 (tests) = ~59,900 LOC
