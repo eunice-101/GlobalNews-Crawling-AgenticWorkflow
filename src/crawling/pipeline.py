@@ -102,33 +102,32 @@ PER_SITE_TIMEOUT_SECONDS = 300.0  # 5 min cooperative deadline per site
 # cleanly, preserving partial results in CrawlState for the next round.
 # ---------------------------------------------------------------------------
 
-@dataclass(frozen=True)
+@dataclass
 class SiteDeadline:
-    """Cooperative timeout signal for per-site crawling.
+    """Cooperative fairness deadline for per-site crawling.
 
-    The deadline is checked at each URL iteration boundary in _crawl_urls().
-    When expired, the thread exits cleanly — no thread killing needed.
-    Partial results are preserved in CrawlState for the next L3/L4 round.
+    The deadline ensures one site does not monopolize a worker thread.
+    When expired, the current round exits cleanly — partial results are
+    preserved in CrawlState. The site is NOT abandoned; it will be
+    re-queued in the next pass with a fresh deadline.
+
+    CRAWL_NEVER_ABANDON: deadline causes "yield to other sites", not "give up".
     """
 
     _deadline: float
+    _timeout_seconds: float
 
     @staticmethod
     def create(timeout_seconds: float) -> SiteDeadline:
-        """Create a deadline from now + timeout_seconds.
-
-        Args:
-            timeout_seconds: Must be positive. Zero or negative would
-                create an already-expired deadline, silently skipping all sites.
-
-        Raises:
-            ValueError: If timeout_seconds is not positive.
-        """
+        """Create a deadline from now + timeout_seconds."""
         if timeout_seconds <= 0:
             raise ValueError(
                 f"timeout_seconds must be positive, got {timeout_seconds}"
             )
-        return SiteDeadline(_deadline=time.monotonic() + timeout_seconds)
+        return SiteDeadline(
+            _deadline=time.monotonic() + timeout_seconds,
+            _timeout_seconds=timeout_seconds,
+        )
 
     @property
     def expired(self) -> bool:
@@ -491,10 +490,15 @@ class CrawlingPipeline:
             try:
                 results = self._run_single_pass(target_sites, restart)
 
-                # Merge results (latest overwrites previous if re-crawled)
+                # Merge results — P1: completed result replaces yielded result
                 for result in results:
                     existing = all_results.get(result.source_id)
-                    if existing is None or result.extracted_count > existing.extracted_count:
+                    if existing is None:
+                        all_results[result.source_id] = result
+                    elif existing.deadline_yielded and not result.deadline_yielded:
+                        # Previously yielded, now completed → replace
+                        all_results[result.source_id] = result
+                    elif result.extracted_count > existing.extracted_count:
                         all_results[result.source_id] = result
 
                 # Check if any sites need re-processing
@@ -530,7 +534,98 @@ class CrawlingPipeline:
                 if restart >= L4_MAX_RESTARTS:
                     raise
 
+        # CRAWL_NEVER_ABANDON: after L4 restarts + Never-Abandon loop,
+        # re-check for incomplete sites and run additional passes.
+        # Sites that yielded their deadline get fresh passes with new deadlines.
+        pass_number = L4_MAX_RESTARTS
+        while True:
+            incomplete = self._get_incomplete_sites(target_sites, all_results)
+            if not incomplete:
+                logger.info(
+                    "crawl_never_abandon_all_complete total_passes=%s",
+                    pass_number,
+                )
+                break
+
+            pass_number += 1
+            logger.info(
+                "crawl_never_abandon_pass pass=%s incomplete_sites=%s",
+                pass_number, len(incomplete),
+            )
+
+            # Build a filtered target_sites dict for incomplete sites only
+            incomplete_targets = {
+                sid: target_sites[sid] for sid in incomplete
+                if sid in target_sites
+            }
+
+            try:
+                results = self._run_single_pass(incomplete_targets, pass_number)
+                # P1: completed result replaces yielded result (same as L4 merge)
+                for result in results:
+                    existing = all_results.get(result.source_id)
+                    if existing is None:
+                        all_results[result.source_id] = result
+                    elif existing.deadline_yielded and not result.deadline_yielded:
+                        all_results[result.source_id] = result
+                    elif result.extracted_count > existing.extracted_count:
+                        all_results[result.source_id] = result
+            except KeyboardInterrupt:
+                logger.warning("pipeline_interrupted pass=%s", pass_number)
+                raise
+            except Exception as e:
+                logger.error(
+                    "crawl_never_abandon_pass_error pass=%s error=%s",
+                    pass_number, str(e)[:200],
+                )
+                # Backoff before next attempt
+                time.sleep(min(pass_number * 30, 300))
+
         return list(all_results.values())
+
+    def _get_incomplete_sites(
+        self,
+        target_sites: dict[str, dict[str, Any]],
+        results: dict[str, CrawlResult],
+    ) -> list[str]:
+        """Return site IDs that have not completed crawling.
+
+        P1 hallucination prevention: CrawlState is the authoritative
+        completion source. mark_site_complete() is only called when
+        extracted_count > 0 AND deadline_yielded=False, so CrawlState
+        cannot contain false completions.
+
+        Check order (critical — prevents infinite loop):
+        1. CrawlState.is_site_complete() → FIRST (authoritative)
+        2. deadline_yielded → only if CrawlState says NOT complete
+        3. Error-based heuristics → fallback
+        """
+        assert self._crawl_state is not None
+        incomplete: list[str] = []
+
+        for site_id in target_sites:
+            # CrawlState is authoritative — if it says complete, the site
+            # ran to completion in some pass (no yield). Old results in
+            # all_results may have stale deadline_yielded=True from
+            # earlier passes, but CrawlState is more recent and reliable.
+            if self._crawl_state.is_site_complete(site_id):
+                continue
+
+            result = results.get(site_id)
+
+            # P1: deadline_yielded means partial crawl — must resume
+            if result is not None and result.deadline_yielded:
+                incomplete.append(site_id)
+                continue
+
+            # No result at all
+            if result is None:
+                incomplete.append(site_id)
+            elif result.extracted_count == 0 and result.errors:
+                # Had errors but no articles — needs retry
+                incomplete.append(site_id)
+
+        return incomplete
 
     def _check_restart_needed(
         self,
@@ -914,9 +1009,7 @@ class CrawlingPipeline:
                 results.append(CrawlResult(source_id=site_id))
                 continue
 
-            # Check circuit breaker — Crawling Absolute Principle (크롤링 절대 원칙):
-            # NEVER abandon a site. When circuit breaker is OPEN, force
-            # immediate HALF_OPEN probe with maximum escalation (TotalWar).
+            # Circuit breaker — D-7: CRAWL_NEVER_ABANDON from constants.py (SOT)
             if not self._circuit_breakers.is_allowed(site_id):
                 if CRAWL_NEVER_ABANDON:
                     logger.warning(
@@ -990,15 +1083,10 @@ class CrawlingPipeline:
                     )
                     futures[future] = site_id
 
-                # H-18 fix: total pipeline timeout to prevent indefinite hang.
-                # Budget: enough for all sites at max deadline + generous buffer.
-                total_timeout = (
-                    PER_SITE_TIMEOUT_SECONDS
-                    * (len(site_tasks) / max(DEFAULT_CONCURRENCY, 1))
-                    + 600  # 10 min buffer
-                )
+                # Global safety timeout: 24 hours. Per-site deadlines handle
+                # fairness; this is a backstop for catastrophic hangs only.
+                total_timeout = 86400.0  # 24 hours
 
-                # Collect results as sites complete.
                 try:
                     for future in as_completed(futures, timeout=total_timeout):
                         site_id = futures[future]
@@ -1020,23 +1108,24 @@ class CrawlingPipeline:
 
                         logger.info(
                             "crawl_site_complete site=%s articles=%s discovered=%s "
-                            "failed=%s elapsed=%ss",
+                            "failed=%s elapsed=%ss yielded=%s",
                             site_id, result.extracted_count, result.discovered_urls,
                             result.failed_count, round(result.elapsed_seconds, 1),
+                            result.deadline_yielded,
                         )
                 except TimeoutError:
-                    # H-18: global timeout reached — collect whatever completed
+                    # 24-hour global timeout — collect partial, re-queue in next pass
                     completed_ids = {r.source_id for r in results}
                     for future, site_id in futures.items():
                         if site_id not in completed_ids:
                             logger.error(
                                 "site_crawl_global_timeout site_id=%s — "
-                                "deferred to next restart",
+                                "will retry in next pass",
                                 site_id,
                             )
                             results.append(CrawlResult(
                                 source_id=site_id,
-                                errors=["Global pipeline timeout — deferred"],
+                                errors=["Global 24h timeout — deferred to next pass"],
                             ))
                             future.cancel()
 
@@ -1146,15 +1235,14 @@ class CrawlingPipeline:
         assert self._retry_manager is not None
 
         for round_num in range(1, L3_MAX_ROUNDS + 1):
-            # Cooperative deadline check at round boundary
+            # Cooperative deadline check at round boundary — yield to other sites.
+            # P1: deadline_yielded flag prevents false completion marking.
             if deadline is not None and deadline.expired:
-                logger.warning(
-                    "site_deadline_expired site_id=%s round=%s — "
-                    "deferred to next round/restart",
+                result.deadline_yielded = True
+                logger.info(
+                    "site_deadline_yield site_id=%s round=%s — "
+                    "yielding worker to other sites, will resume in next pass",
                     site_id, round_num,
-                )
-                result.errors.append(
-                    f"Deadline expired before round {round_num} — deferred"
                 )
                 break
 
@@ -1166,20 +1254,26 @@ class CrawlingPipeline:
                 site_id, round_num, L3_MAX_ROUNDS,
             )
 
-            # Phase 1: URL Discovery
+            # Phase 1: URL Discovery (internal retry in _discover_urls)
             discovered = self._discover_urls(site_id, site_cfg)
             if not discovered:
-                logger.warning("no_urls_discovered site_id=%s round=%s", site_id, round_num)
-                if round_num == 1:
-                    result.elapsed_seconds = time.monotonic() - start_time
-                    return result
-                break
+                logger.warning(
+                    "no_urls_discovered site_id=%s round=%s — "
+                    "continuing to next round",
+                    site_id, round_num,
+                )
+                result.errors.append(f"URL discovery failed round {round_num}")
+                continue  # try next round, never abandon on first failure
 
             # Filter out already-processed URLs
             new_urls = self._filter_processed_urls(site_id, discovered)
             if not new_urls:
-                logger.info("all_urls_processed site_id=%s round=%s", site_id, round_num)
-                break
+                logger.info(
+                    "all_urls_processed site_id=%s round=%s — "
+                    "all %s URLs already seen, site complete",
+                    site_id, round_num, len(discovered),
+                )
+                break  # Intentional: all discovered URLs processed = site genuinely done
 
             result.discovered_urls = max(result.discovered_urls, len(discovered))
 
@@ -1240,9 +1334,10 @@ class CrawlingPipeline:
                 else:
                     break
 
-        # Finalize
+        # Finalize — P1: only mark complete if NOT deadline-yielded.
+        # A deadline yield means partial crawl; site must be re-queued.
         assert self._crawl_state is not None
-        if result.extracted_count > 0:
+        if result.extracted_count > 0 and not result.deadline_yielded:
             self._crawl_state.mark_site_complete(site_id)
         self._crawl_state.save()
 
@@ -1429,17 +1524,19 @@ class CrawlingPipeline:
             )
 
         for url_obj in urls:
-            # Cooperative deadline check — exit cleanly at URL boundary.
-            # Partial results are preserved; site NOT marked complete.
+            # Cooperative deadline check — yield worker at URL boundary.
+            # P1: deadline_yielded flag prevents false completion marking.
             if deadline is not None and deadline.expired:
-                logger.warning(
-                    "site_deadline_expired_in_crawl site_id=%s processed=%s remaining=%s",
-                    site_id, result.extracted_count, len(urls) - (result.extracted_count + result.failed_count),
+                result.deadline_yielded = True
+                logger.info(
+                    "site_deadline_yield_in_crawl site_id=%s processed=%s "
+                    "remaining_urls=%s — yielding to other sites",
+                    site_id, result.extracted_count,
+                    len(urls) - (result.extracted_count + result.failed_count),
                 )
-                result.errors.append("Deadline expired during URL crawl — deferred")
                 break
 
-            # Check article cap
+            # Article cap (5000 default) — safety limit for memory
             if result.extracted_count >= self._max_articles:
                 logger.info(
                     "max_articles_reached site_id=%s limit=%s",
@@ -1447,7 +1544,7 @@ class CrawlingPipeline:
                 )
                 break
 
-            # Check circuit breaker — C-1 fix: force half_open instead of abandoning
+            # Circuit breaker — D-7: CRAWL_NEVER_ABANDON from constants.py
             if not self._circuit_breakers.is_allowed(site_id):
                 if CRAWL_NEVER_ABANDON:
                     self._circuit_breakers.force_half_open(site_id)
@@ -1648,6 +1745,9 @@ class CrawlingPipeline:
         target.skipped_freshness_count += source.skipped_freshness_count
         target.tier_used = max(target.tier_used, source.tier_used)
         target.errors.extend(source.errors)
+        # P1: deadline_yielded propagates upward (sticky True)
+        if source.deadline_yielded:
+            target.deadline_yielded = True
 
 
 # ---------------------------------------------------------------------------

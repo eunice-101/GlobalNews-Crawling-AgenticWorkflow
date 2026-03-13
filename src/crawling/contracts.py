@@ -189,3 +189,4 @@ class CrawlResult:
     elapsed_seconds: float = 0.0
     tier_used: int = 1
     errors: list[str] = field(default_factory=list)
+    deadline_yielded: bool = False

@@ -672,18 +672,18 @@ class RetryManager:
         """Advance to the next Never-Abandon cycle.
 
         Returns:
-            True if more cycles remain, False if safety cap reached.
+            Always True — CRAWL_NEVER_ABANDON means no cycle cap.
+            Logs warning at former cap threshold for observability.
         """
         state = self.get_state(site_id)
         state.never_abandon_cycle += 1
-        if state.never_abandon_cycle >= NEVER_ABANDON_MAX_CYCLES:
-            logger.error(
-                "never_abandon_safety_cap site_id=%s cycles=%s "
-                "max=%s — FINAL escalation, manual intervention required",
-                site_id, state.never_abandon_cycle, NEVER_ABANDON_MAX_CYCLES,
+        if state.never_abandon_cycle == NEVER_ABANDON_MAX_CYCLES:
+            logger.warning(
+                "never_abandon_milestone site_id=%s cycles=%s "
+                "— continuing indefinitely (CRAWL_NEVER_ABANDON)",
+                site_id, state.never_abandon_cycle,
             )
-            return False
-        return True
+        return True  # Never stop — crawl until complete
 
     def get_retry_stats(self) -> dict[str, Any]:
         """Get aggregate retry statistics across all sites.
