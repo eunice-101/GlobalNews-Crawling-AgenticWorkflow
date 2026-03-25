@@ -458,81 +458,6 @@ sources:
       daily_article_estimate: 100
       sections_count: 10
       enabled: true
-  irobotnews:
-    name: iRobot News
-    url: https://www.irobotnews.com
-    region: kr
-    language: ko
-    group: D
-    crawl:
-      primary_method: rss
-      fallback_methods:
-      - sitemap
-      - dom
-      rss_url: https://www.irobotnews.com/feed
-      sitemap_url: /sitemap.xml
-      rate_limit_seconds: 10
-      crawl_delay_mandatory: null
-      max_requests_per_hour: 240
-      jitter_seconds: 3
-    anti_block:
-      ua_tier: 3
-      default_escalation_tier: 2
-      max_escalation_tier: 5
-      requires_proxy: true
-      proxy_region: kr
-      bot_block_level: HIGH
-    extraction:
-      paywall_type: none
-      title_only: false
-      rendering_required: false
-      charset: utf-8
-    meta:
-      difficulty_tier: Hard
-      daily_article_estimate: 10
-      sections_count: 5
-      enabled: false
-  marketwatch:
-    name: MarketWatch
-    url: https://www.marketwatch.com
-    region: us
-    language: en
-    group: E
-    crawl:
-      primary_method: rss
-      fallback_methods:
-      - sitemap
-      - dom
-      rss_url: https://www.marketwatch.com/rss
-      rss_sections:
-      - url: https://feeds.marketwatch.com/marketwatch/topstories
-        section: top_stories
-      - url: https://feeds.marketwatch.com/marketwatch/marketpulse
-        section: market_pulse
-      - url: https://feeds.marketwatch.com/marketwatch/bulletins
-        section: bulletins
-      sitemap_url: /sitemap.xml
-      rate_limit_seconds: 10
-      crawl_delay_mandatory: null
-      max_requests_per_hour: 240
-      jitter_seconds: 3
-    anti_block:
-      ua_tier: 3
-      default_escalation_tier: 2
-      max_escalation_tier: 5
-      requires_proxy: false
-      proxy_region: null
-      bot_block_level: HIGH
-    extraction:
-      paywall_type: soft-metered
-      title_only: false
-      rendering_required: false
-      charset: utf-8
-    meta:
-      difficulty_tier: Hard
-      daily_article_estimate: 200
-      sections_count: 12
-      enabled: true
   huffpost:
     name: HuffPost
     url: https://www.huffpost.com
@@ -612,73 +537,6 @@ sources:
       daily_article_estimate: 300
       sections_count: 20
       enabled: true
-  ft:
-    name: Financial Times
-    url: https://www.ft.com
-    region: uk
-    language: en
-    group: E
-    crawl:
-      primary_method: sitemap
-      fallback_methods:
-      - dom
-      rss_url: null
-      sitemap_url: /sitemap.xml
-      rate_limit_seconds: 10
-      crawl_delay_mandatory: null
-      max_requests_per_hour: 240
-      jitter_seconds: 3
-    anti_block:
-      ua_tier: 3
-      default_escalation_tier: 3
-      max_escalation_tier: 6
-      requires_proxy: false
-      proxy_region: null
-      bot_block_level: HIGH
-    extraction:
-      paywall_type: hard
-      title_only: true
-      rendering_required: false
-      charset: utf-8
-    meta:
-      difficulty_tier: Extreme
-      daily_article_estimate: 150
-      sections_count: 15
-      enabled: false
-  wsj:
-    name: Wall Street Journal
-    url: https://www.wsj.com
-    region: us
-    language: en
-    group: E
-    crawl:
-      primary_method: sitemap
-      fallback_methods:
-      - dom
-      rss_url: null
-      sitemap_url: /sitemap.xml
-      rate_limit_seconds: 10
-      crawl_delay_mandatory: null
-      max_requests_per_hour: 240
-      jitter_seconds: 3
-      bypass_discovery_preferred: true
-    anti_block:
-      ua_tier: 3
-      default_escalation_tier: 1
-      max_escalation_tier: 6
-      requires_proxy: false
-      proxy_region: null
-      bot_block_level: HIGH
-    extraction:
-      paywall_type: hard
-      title_only: true
-      rendering_required: false
-      charset: utf-8
-    meta:
-      difficulty_tier: Extreme
-      daily_article_estimate: 200
-      sections_count: 15
-      enabled: false
   latimes:
     name: Los Angeles Times
     url: https://www.latimes.com
@@ -760,81 +618,6 @@ sources:
       difficulty_tier: Hard
       daily_article_estimate: 50
       sections_count: 10
-      enabled: true
-  cnn:
-    name: CNN
-    url: https://edition.cnn.com
-    region: us
-    language: en
-    group: E
-    crawl:
-      primary_method: sitemap
-      fallback_methods:
-      - dom
-      - rss
-      rss_url: http://rss.cnn.com/rss/edition.rss
-      sitemap_url: /sitemaps/sitemap-index.xml
-      sitemap_sections:
-      - sitemap-articles-*.xml
-      - sitemap-section-*.xml
-      - cnn-news-sitemap.xml
-      rate_limit_seconds: 5
-      crawl_delay_mandatory: null
-      max_requests_per_hour: 720
-      jitter_seconds: 0
-    anti_block:
-      ua_tier: 2
-      default_escalation_tier: 1
-      max_escalation_tier: 5
-      requires_proxy: false
-      proxy_region: null
-      bot_block_level: HIGH
-    extraction:
-      paywall_type: none
-      title_only: false
-      rendering_required: false
-      charset: utf-8
-    meta:
-      difficulty_tier: Medium
-      daily_article_estimate: 500
-      sections_count: 20
-      enabled: false
-  bloomberg:
-    name: Bloomberg
-    url: https://www.bloomberg.com
-    region: us
-    language: en
-    group: E
-    crawl:
-      primary_method: sitemap
-      fallback_methods:
-      - dom
-      rss_url: null
-      sitemap_urls:
-      - https://www.bloomberg.com/feeds/sitemap_news.xml
-      - https://www.bloomberg.com/feeds/sitemap_companies.xml
-      - https://www.bloomberg.com/feeds/sitemap_securities.xml
-      sitemap_url: /feeds/sitemap_news.xml
-      rate_limit_seconds: 10
-      crawl_delay_mandatory: null
-      max_requests_per_hour: 240
-      jitter_seconds: 3
-    anti_block:
-      ua_tier: 3
-      default_escalation_tier: 1
-      max_escalation_tier: 6
-      requires_proxy: false
-      proxy_region: null
-      bot_block_level: HIGH
-    extraction:
-      paywall_type: hard
-      title_only: true
-      rendering_required: true
-      charset: utf-8
-    meta:
-      difficulty_tier: Extreme
-      daily_article_estimate: 200
-      sections_count: 15
       enabled: true
   globaltimes:
     name: Global Times
@@ -1425,40 +1208,6 @@ sources:
       enabled: true
       difficulty_tier: Medium
       daily_article_estimate: 60
-      sections_count: 5
-  euractiv:
-    name: Euractiv
-    url: https://www.euractiv.com
-    language: en
-    group: E
-    region: EU
-    crawl:
-      primary_method: rss
-      fallback_methods:
-      - sitemap
-      - dom
-      rss_url: https://feeds.feedburner.com/euractiv
-      sitemap_url: https://www.euractiv.com/sitemap.xml
-      rate_limit_seconds: 2
-      max_requests_per_hour: 200
-      jitter_seconds: 0
-      sections:
-      - https://www.euractiv.com
-    anti_block:
-      ua_tier: 1
-      default_escalation_tier: 1
-      max_escalation_tier: 5
-      requires_proxy: false
-      bot_block_level: MEDIUM
-    extraction:
-      paywall_type: none
-      title_only: false
-      rendering_required: false
-      charset: utf-8
-    meta:
-      enabled: false
-      difficulty_tier: Easy
-      daily_article_estimate: 40
       sections_count: 5
   natureasia:
     name: Nature Asia
@@ -2283,74 +2032,6 @@ sources:
       difficulty_tier: Medium
       daily_article_estimate: 100
       sections_count: 5
-  lefigaro:
-    name: Le Figaro
-    url: https://www.lefigaro.fr
-    language: fr
-    group: G
-    region: FR
-    crawl:
-      primary_method: rss
-      fallback_methods:
-      - sitemap
-      - dom
-      rss_url: https://www.lefigaro.fr/feed
-      sitemap_url: https://www.lefigaro.fr/sitemap.xml
-      rate_limit_seconds: 5
-      max_requests_per_hour: 60
-      jitter_seconds: 0
-      sections:
-      - https://www.lefigaro.fr
-    anti_block:
-      ua_tier: 3
-      default_escalation_tier: 1
-      max_escalation_tier: 5
-      requires_proxy: false
-      bot_block_level: MEDIUM
-    extraction:
-      paywall_type: soft-metered
-      title_only: false
-      rendering_required: false
-      charset: utf-8
-    meta:
-      enabled: false
-      difficulty_tier: Medium
-      daily_article_estimate: 100
-      sections_count: 5
-  liberation:
-    name: Liberation
-    url: https://www.liberation.fr
-    language: fr
-    group: G
-    region: FR
-    crawl:
-      primary_method: rss
-      fallback_methods:
-      - sitemap
-      - dom
-      rss_url: https://www.liberation.fr/feed
-      sitemap_url: https://www.liberation.fr/sitemap.xml
-      rate_limit_seconds: 5
-      max_requests_per_hour: 60
-      jitter_seconds: 0
-      sections:
-      - https://www.liberation.fr
-    anti_block:
-      ua_tier: 3
-      default_escalation_tier: 1
-      max_escalation_tier: 5
-      requires_proxy: false
-      bot_block_level: MEDIUM
-    extraction:
-      paywall_type: soft-metered
-      title_only: false
-      rendering_required: false
-      charset: utf-8
-    meta:
-      enabled: false
-      difficulty_tier: Medium
-      daily_article_estimate: 60
-      sections_count: 5
   france24:
     name: France 24
     url: https://www.france24.com
@@ -2383,40 +2064,6 @@ sources:
     meta:
       enabled: true
       difficulty_tier: Easy
-      daily_article_estimate: 80
-      sections_count: 5
-  ouestfrance:
-    name: Ouest-France
-    url: https://www.ouest-france.fr
-    language: fr
-    group: G
-    region: FR
-    crawl:
-      primary_method: rss
-      fallback_methods:
-      - sitemap
-      - dom
-      rss_url: https://www.ouest-france.fr/feed
-      sitemap_url: https://www.ouest-france.fr/sitemap.xml
-      rate_limit_seconds: 5
-      max_requests_per_hour: 60
-      jitter_seconds: 0
-      sections:
-      - https://www.ouest-france.fr
-    anti_block:
-      ua_tier: 3
-      default_escalation_tier: 1
-      max_escalation_tier: 5
-      requires_proxy: false
-      bot_block_level: MEDIUM
-    extraction:
-      paywall_type: none
-      title_only: false
-      rendering_required: false
-      charset: utf-8
-    meta:
-      enabled: false
-      difficulty_tier: Medium
       daily_article_estimate: 80
       sections_count: 5
   wyborcza:
@@ -2690,39 +2337,6 @@ sources:
       enabled: true
       difficulty_tier: Medium
       daily_article_estimate: 60
-      sections_count: 5
-  icelandmonitor:
-    name: Iceland Monitor
-    url: https://icelandmonitor.mbl.is/news/
-    language: en
-    group: G
-    region: IS
-    crawl:
-      primary_method: rss
-      fallback_methods:
-      - dom
-      rss_url: https://icelandmonitor.mbl.is/news/feed
-      sitemap_url: https://icelandmonitor.mbl.is/news/sitemap.xml
-      rate_limit_seconds: 2
-      max_requests_per_hour: 200
-      jitter_seconds: 0
-      sections:
-      - https://icelandmonitor.mbl.is/news/
-    anti_block:
-      ua_tier: 1
-      default_escalation_tier: 1
-      max_escalation_tier: 5
-      requires_proxy: false
-      bot_block_level: MEDIUM
-    extraction:
-      paywall_type: none
-      title_only: false
-      rendering_required: false
-      charset: utf-8
-    meta:
-      enabled: false
-      difficulty_tier: Medium
-      daily_article_estimate: 10
       sections_count: 5
   allafrica:
     name: AllAfrica
@@ -3314,6 +2928,15 @@ sources:
       - sitemap
       - dom
       rss_url: https://www.france24.com/fr/france/rss
+      rss_sections:
+      - url: https://www.france24.com/fr/éco-tech/rss
+        section: economie_tech
+      - url: https://www.france24.com/fr/europe/rss
+        section: europe
+      - url: https://www.france24.com/fr/culture/rss
+        section: culture
+      - url: https://www.france24.com/fr/sports/rss
+        section: sports
       sitemap_url: /sitemap.xml
       rate_limit_seconds: 5
       crawl_delay_mandatory: null
@@ -3333,46 +2956,12 @@ sources:
       charset: utf-8
     meta:
       difficulty_tier: Easy
-      daily_article_estimate: 80
+      daily_article_estimate: 200
       sections_count: 10
       enabled: true
-  cnbc:
-    name: CNBC
-    url: https://www.cnbc.com
-    region: us
-    language: en
-    group: E
-    crawl:
-      primary_method: rss
-      fallback_methods:
-      - sitemap
-      - dom
-      rss_url: https://www.cnbc.com/id/100003114/device/rss/rss.html
-      rss_fallback_url: https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114
-      sitemap_url: /sitemap.xml
-      rate_limit_seconds: 5
-      crawl_delay_mandatory: null
-      max_requests_per_hour: 720
-      jitter_seconds: 2
-    anti_block:
-      ua_tier: 3
-      default_escalation_tier: 2
-      max_escalation_tier: 5
-      requires_proxy: false
-      proxy_region: null
-      bot_block_level: HIGH
-    extraction:
-      paywall_type: none
-      title_only: false
-      rendering_required: false
-      charset: utf-8
-    meta:
-      difficulty_tier: Hard
-      daily_article_estimate: 200
-      sections_count: 15
-      enabled: true
-      note: RSS feed verified working (32 items). 403 is on article pages. robots.txt
-        blocks Claude/AI bots explicitly.
+      note: Expanded 2026-03-25 with 4 section feeds (economie, europe, culture, sports)
+        to replace Le Figaro, Liberation, Ouest-France. France24 is the only French-language
+        source accessible outside France. All 14 other French sites tested block non-FR IPs.
   fortune:
     name: Fortune
     url: https://fortune.com
@@ -4098,3 +3687,318 @@ sources:
       daily_article_estimate: 30
       sections_count: 4
       enabled: true
+  yahoo_finance:
+    name: Yahoo Finance
+    url: https://finance.yahoo.com
+    region: us
+    language: en
+    group: E
+    crawl:
+      primary_method: rss
+      fallback_methods:
+      - dom
+      rss_url: https://finance.yahoo.com/news/rssindex
+      rate_limit_seconds: 5
+      crawl_delay_mandatory: null
+      max_requests_per_hour: 720
+      jitter_seconds: 0
+    anti_block:
+      ua_tier: 1
+      default_escalation_tier: 1
+      max_escalation_tier: 3
+      requires_proxy: false
+      proxy_region: null
+      bot_block_level: LOW
+    extraction:
+      paywall_type: none
+      title_only: false
+      rendering_required: false
+      charset: utf-8
+    meta:
+      difficulty_tier: Easy
+      daily_article_estimate: 250
+      sections_count: 8
+      enabled: true
+      note: Added 2026-03-25 as Bloomberg replacement. RSS verified (50 items, 5min TTL).
+        Covers global financial markets, stocks, economy, crypto. No paywall.
+  investing_com:
+    name: Investing.com
+    url: https://www.investing.com
+    region: us
+    language: en
+    group: E
+    crawl:
+      primary_method: rss
+      fallback_methods:
+      - dom
+      rss_url: https://www.investing.com/rss/news.rss
+      rss_sections:
+      - url: https://www.investing.com/rss/news_25.rss
+        section: stock_market
+      - url: https://www.investing.com/rss/news_14.rss
+        section: economy
+      - url: https://www.investing.com/rss/news_301.rss
+        section: cryptocurrency
+      rate_limit_seconds: 5
+      crawl_delay_mandatory: null
+      max_requests_per_hour: 720
+      jitter_seconds: 0
+    anti_block:
+      ua_tier: 1
+      default_escalation_tier: 1
+      max_escalation_tier: 3
+      requires_proxy: false
+      proxy_region: null
+      bot_block_level: LOW
+    extraction:
+      paywall_type: none
+      title_only: false
+      rendering_required: false
+      charset: utf-8
+    meta:
+      difficulty_tier: Easy
+      daily_article_estimate: 150
+      sections_count: 10
+      enabled: true
+      note: Added 2026-03-25 as CNBC replacement. 4 RSS section feeds verified.
+        Covers real-time markets, forex, commodities, economic indicators, crypto.
+  seekingalpha:
+    name: Seeking Alpha
+    url: https://seekingalpha.com
+    region: us
+    language: en
+    group: E
+    crawl:
+      primary_method: rss
+      fallback_methods: []
+      rss_url: https://seekingalpha.com/feed.xml
+      rss_sections:
+      - url: https://seekingalpha.com/market_currents.xml
+        section: market_currents
+      rate_limit_seconds: 10
+      crawl_delay_mandatory: null
+      max_requests_per_hour: 360
+      jitter_seconds: 2
+    anti_block:
+      ua_tier: 2
+      default_escalation_tier: 1
+      max_escalation_tier: 3
+      requires_proxy: false
+      proxy_region: null
+      bot_block_level: MEDIUM
+    extraction:
+      paywall_type: soft-metered
+      title_only: false
+      rendering_required: false
+      charset: utf-8
+    meta:
+      difficulty_tier: Medium
+      daily_article_estimate: 120
+      sections_count: 5
+      enabled: true
+      note: Added 2026-03-25 as Bloomberg depth/analysis complement. RSS feeds verified
+        (30 items main + 7 market currents). Deep investment analysis, earnings transcripts.
+  cbs_moneywatch:
+    name: CBS News MoneyWatch
+    url: https://www.cbsnews.com/moneywatch/
+    region: us
+    language: en
+    group: E
+    crawl:
+      primary_method: rss
+      fallback_methods:
+      - dom
+      rss_url: https://www.cbsnews.com/latest/rss/moneywatch
+      rate_limit_seconds: 5
+      crawl_delay_mandatory: null
+      max_requests_per_hour: 720
+      jitter_seconds: 0
+    anti_block:
+      ua_tier: 1
+      default_escalation_tier: 1
+      max_escalation_tier: 3
+      requires_proxy: false
+      proxy_region: null
+      bot_block_level: LOW
+    extraction:
+      paywall_type: none
+      title_only: false
+      rendering_required: false
+      charset: utf-8
+    meta:
+      difficulty_tier: Easy
+      daily_article_estimate: 80
+      sections_count: 5
+      enabled: true
+      note: Added 2026-03-25 as WSJ replacement. US financial/business news.
+        RSS verified (30 items). No paywall, full article access.
+  cityam:
+    name: City A.M.
+    url: https://www.cityam.com
+    region: uk
+    language: en
+    group: E
+    crawl:
+      primary_method: rss
+      fallback_methods:
+      - dom
+      rss_url: https://www.cityam.com/feed/
+      rate_limit_seconds: 5
+      crawl_delay_mandatory: null
+      max_requests_per_hour: 720
+      jitter_seconds: 0
+    anti_block:
+      ua_tier: 1
+      default_escalation_tier: 1
+      max_escalation_tier: 3
+      requires_proxy: false
+      proxy_region: null
+      bot_block_level: LOW
+    extraction:
+      paywall_type: none
+      title_only: false
+      rendering_required: false
+      charset: utf-8
+    meta:
+      difficulty_tier: Easy
+      daily_article_estimate: 100
+      sections_count: 8
+      enabled: true
+      note: Added 2026-03-25 as FT replacement. UK financial/business news (London City focus).
+        RSS verified (20 items). No paywall, full article access.
+  abcnews:
+    name: ABC News
+    url: https://abcnews.go.com
+    region: us
+    language: en
+    group: E
+    crawl:
+      primary_method: rss
+      fallback_methods:
+      - dom
+      rss_url: https://abcnews.go.com/abcnews/topstories
+      rate_limit_seconds: 5
+      crawl_delay_mandatory: null
+      max_requests_per_hour: 720
+      jitter_seconds: 0
+    anti_block:
+      ua_tier: 1
+      default_escalation_tier: 1
+      max_escalation_tier: 3
+      requires_proxy: false
+      proxy_region: null
+      bot_block_level: LOW
+    extraction:
+      paywall_type: none
+      title_only: false
+      rendering_required: false
+      charset: utf-8
+    meta:
+      difficulty_tier: Easy
+      daily_article_estimate: 150
+      sections_count: 10
+      enabled: true
+      note: Added 2026-03-25 as CNN replacement. US general news (ABC/Disney).
+        RSS verified (25 items). No paywall, full article access.
+  ddaily:
+    name: Digital Daily
+    url: https://www.ddaily.co.kr
+    region: kr
+    language: ko
+    group: D
+    crawl:
+      primary_method: rss
+      fallback_methods:
+      - dom
+      rss_url: https://feeds.feedburner.com/ddaily
+      rate_limit_seconds: 5
+      crawl_delay_mandatory: null
+      max_requests_per_hour: 720
+      jitter_seconds: 0
+    anti_block:
+      ua_tier: 1
+      default_escalation_tier: 1
+      max_escalation_tier: 3
+      requires_proxy: false
+      proxy_region: null
+      bot_block_level: LOW
+    extraction:
+      paywall_type: none
+      title_only: false
+      rendering_required: false
+      charset: utf-8
+    meta:
+      difficulty_tier: Easy
+      daily_article_estimate: 50
+      sections_count: 5
+      enabled: true
+      note: Added 2026-03-25 as iRobot News replacement. Korean tech/IT news (디지털데일리).
+        RSS verified (15 items). No paywall, full article access.
+  euobserver:
+    name: EUobserver
+    url: https://euobserver.com
+    region: EU
+    language: en
+    group: E
+    crawl:
+      primary_method: rss
+      fallback_methods:
+      - dom
+      rss_url: https://euobserver.com/rss
+      rate_limit_seconds: 5
+      crawl_delay_mandatory: null
+      max_requests_per_hour: 720
+      jitter_seconds: 0
+    anti_block:
+      ua_tier: 1
+      default_escalation_tier: 1
+      max_escalation_tier: 3
+      requires_proxy: false
+      proxy_region: null
+      bot_block_level: LOW
+    extraction:
+      paywall_type: soft-metered
+      title_only: false
+      rendering_required: false
+      charset: utf-8
+    meta:
+      difficulty_tier: Easy
+      daily_article_estimate: 30
+      sections_count: 5
+      enabled: true
+      note: Added 2026-03-25 as Euractiv replacement. Brussels-based EU policy news.
+        RSS verified (20 items). Soft paywall but article pages accessible.
+  grapevine:
+    name: Reykjavik Grapevine
+    url: https://grapevine.is
+    region: IS
+    language: en
+    group: G
+    crawl:
+      primary_method: rss
+      fallback_methods:
+      - dom
+      rss_url: https://grapevine.is/feed/
+      rate_limit_seconds: 2
+      crawl_delay_mandatory: null
+      max_requests_per_hour: 360
+      jitter_seconds: 0
+    anti_block:
+      ua_tier: 1
+      default_escalation_tier: 1
+      max_escalation_tier: 3
+      requires_proxy: false
+      proxy_region: null
+      bot_block_level: LOW
+    extraction:
+      paywall_type: none
+      title_only: false
+      rendering_required: false
+      charset: utf-8
+    meta:
+      difficulty_tier: Easy
+      daily_article_estimate: 15
+      sections_count: 5
+      enabled: true
+      note: Added 2026-03-25 as Iceland Monitor replacement. English-language Icelandic news.
+        RSS verified (50 items). No paywall, full article access.

@@ -1457,10 +1457,27 @@ class CrawlingPipeline:
                 else:
                     break
 
-        # Finalize — P1: only mark complete if NOT deadline-yielded.
-        # A deadline yield means partial crawl; site must be re-queued.
+        # Finalize — mark complete if crawl succeeded OR sufficient articles
+        # collected despite deadline yield.
+        # P1: deadline_yielded=True means partial crawl. However, if the site
+        # already collected ≥30% of its daily estimate, re-queuing wastes time
+        # on rate-limited sites that will just yield again. Mark complete to
+        # avoid infinite incomplete loops across restarts.
         assert self._crawl_state is not None
-        if result.extracted_count > 0 and not result.deadline_yielded:
+        _sufficient_threshold = 0.3  # 30% of daily estimate = "good enough"
+        _daily_est = site_cfg.get("meta", {}).get("daily_article_estimate", 0)
+        _is_sufficient = (
+            _daily_est > 0
+            and result.extracted_count >= _daily_est * _sufficient_threshold
+        )
+        if result.extracted_count > 0 and (not result.deadline_yielded or _is_sufficient):
+            if result.deadline_yielded and _is_sufficient:
+                logger.info(
+                    "deadline_yielded_but_sufficient site_id=%s extracted=%s "
+                    "estimate=%s threshold=%.0f%% — marking complete",
+                    site_id, result.extracted_count, _daily_est,
+                    _sufficient_threshold * 100,
+                )
             self._crawl_state.mark_site_complete(site_id)
         self._crawl_state.save()
 
