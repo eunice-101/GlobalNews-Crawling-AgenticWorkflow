@@ -220,7 +220,11 @@ _KO_STOPWORDS = {
     "특파원", "통신", "보도", "데일리", "저작권", "재배포", "헤럴드",
 }
 
-_EN_STOPWORDS = {
+# Multilingual stopwords for word cloud (non-Korean languages).
+# Korean is handled separately via kiwipiepy POS tagging (NNG/NNP only).
+# Source: aligned with stage4_aggregation.py _MULTILINGUAL_STOP_WORDS.
+_LATIN_STOPWORDS = {
+    # English
     "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
     "have", "has", "had", "do", "does", "did", "will", "would", "could",
     "should", "shall", "may", "might", "can", "must", "need",
@@ -246,6 +250,52 @@ _EN_STOPWORDS = {
     "young", "important", "public", "bad", "according", "reuters", "ap",
     "per", "set", "don", "didn", "won", "isn", "aren", "wasn", "weren",
     "haven", "hasn", "hadn", "doesn", "couldn", "shouldn", "wouldn",
+    # Spanish
+    "que", "de", "en", "el", "la", "los", "las", "del", "por", "con",
+    "una", "para", "es", "al", "lo", "como", "pero", "sus", "su",
+    "sin", "sobre", "este", "entre", "cuando", "muy", "ser", "hay",
+    "fue", "son", "desde", "est", "esta", "hasta", "cada", "han",
+    "tiene", "otro", "otra", "dos", "tres", "todo", "toda", "todos",
+    "seg", "siendo", "puede", "hace", "donde", "parte", "contra",
+    "tambi", "sido", "tiene", "mejor", "tras", "mismo",
+    # German
+    "der", "die", "das", "und", "ist", "von", "den", "des", "mit",
+    "ein", "eine", "dem", "auf", "sich", "nicht", "auch", "als",
+    "noch", "nach", "aus", "bei", "nur", "wie", "aber", "war",
+    "wird", "sind", "hat", "vor", "oder", "bis", "mehr", "zum",
+    "zur", "kann", "schon", "wenn", "wir", "sie", "ich",
+    "seine", "unter", "haben", "diese", "einem", "einer", "grad",
+    "zwei", "wurden", "worden", "hatte", "seit", "lange", "gibt",
+    # French
+    "les", "des", "est", "pas", "une", "par", "sur", "dans", "que",
+    "pour", "qui", "son", "avec", "plus", "sont", "ses", "mais",
+    "ont", "cette", "aux", "tout", "leur", "fait", "entre", "aussi",
+    "tous", "elle", "comme", "peut", "autre", "apr",
+    # Italian
+    "che", "non", "per", "una", "del", "della", "dei", "nel", "nella",
+    "con", "sono", "gli", "anche", "dal", "alla", "sul", "dello",
+    "alle", "stato", "essere", "tra", "fra", "dopo", "suo", "suoi",
+    "questo", "quella", "hanno", "fatto", "come", "quando", "cosa",
+    # Portuguese
+    "que", "dos", "das", "uma", "com", "para", "por", "mais", "foi",
+    "ser", "como", "tem", "seu", "sua", "ele", "ela", "nos", "aos",
+    "pela", "pelo", "entre", "sobre", "havia", "pode", "seus",
+    "suas", "ainda", "todos", "esta", "esse", "essa", "isso",
+    # Russian (transliterated — regex captures Latin chars only)
+    # Russian Cyrillic is not captured by [a-zA-Z] regex, so no entries needed.
+    # Norwegian
+    "det", "som", "har", "med", "til", "den", "att", "han", "hun",
+    "var", "vil", "kan", "fra", "mot", "ble", "ved", "mot",
+    "eller", "etter", "skal", "alle", "over", "oss", "dem",
+    # Swedish
+    "det", "som", "och", "att", "med", "har", "den", "var",
+    "kan", "ett", "ska", "alla", "sin", "sina", "mot", "vid",
+    # Czech
+    "tak", "ale", "jak", "pro", "pod", "nad", "aby", "jsou",
+    "jeho", "jej", "nej", "jen", "byl", "kde", "kdy", "bez",
+    # Polish
+    "nie", "tak", "jak", "ale", "czy", "jest", "aby", "pod",
+    "nad", "bez", "dla", "ich", "tej", "ten", "tym",
 }
 
 
@@ -275,7 +325,7 @@ def extract_word_frequencies(
         for text in en_texts:
             for m in pattern.finditer(text.lower()):
                 w = m.group()
-                if w not in _EN_STOPWORDS:
+                if w not in _LATIN_STOPWORDS:
                     word_freq[w] = word_freq.get(w, 0) + 1
 
     return word_freq

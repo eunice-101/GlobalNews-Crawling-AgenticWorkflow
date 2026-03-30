@@ -106,7 +106,10 @@ DISCOVERY_BYPASS_MAX_ATTEMPTS = 5
 
 # Maximum extra full-site passes after L4 restarts exhaust (outer multi-pass loop).
 # Independent from per-site NEVER_ABANDON_MAX_CYCLES in retry_manager.py.
-MULTI_PASS_MAX_EXTRA = 10
+# Reduced from 10→5: with 10 cycles × 10 passes, fully-blocked sites (429)
+# consumed ~10h of crawl time.  5 passes still allows partial sites to complete
+# while capping worst-case to ~5h.
+MULTI_PASS_MAX_EXTRA = 5
 
 # Bypass state persistence — cross-crawl learning SOT
 BYPASS_STATE_PATH = DATA_CONFIG_DIR / "bypass_state.json"
@@ -208,6 +211,13 @@ KCELECTRA_MODEL_NAME = "monologg/koelectra-base-finetuned-naver-ner"
 # Changed 2026-03-24: 31h → ~10h Stage 3 on M3 8GB
 BART_MNLI_MODEL_NAME = "valhalla/distilbart-mnli-12-3"
 NER_MULTILINGUAL_MODEL_NAME = "Davlan/xlm-roberta-base-ner-hrl"
+
+# Multilingual sentiment model: XLM-RoBERTa fine-tuned on 8 languages
+# (ar, en, fr, de, hi, it, pt, es). For ko/ja/ru/zh, relies on
+# XLM-R cross-lingual transfer (~0.55-0.60 F1 vs ~0.69 for trained langs).
+MULTILINGUAL_SENTIMENT_MODEL_NAME = (
+    "cardiffnlp/twitter-xlm-roberta-base-sentiment-multilingual"
+)
 
 # =============================================================================
 # Crawling Group Definitions
